@@ -97,15 +97,27 @@ class SettingsStore @Inject constructor(
     data class Snapshot(val apiKey: String?, val region: Region, val model: String)
 
     companion object {
-        /** Cheapest function-calling-capable model per the research brief. */
-        const val DEFAULT_MODEL: String = "MiniMax-M2"
+        /**
+         * Default = M2.7. The function-calling guide
+         * (platform.minimax.io/docs/guides/text-m2-function-call) explicitly
+         * cites M2.7 for "exceptional Tool Use capabilities" — the right
+         * default for an agentic runtime. Users who want faster/cheaper
+         * can pick a highspeed or older variant in Settings.
+         */
+        const val DEFAULT_MODEL: String = "MiniMax-M2.7"
 
+        /**
+         * Models documented on /v1/chat/completions per the OpenAI-compat
+         * spec page (text-chat-openai.md). M1 and VL-01 aren't listed on
+         * this endpoint and are intentionally excluded.
+         */
         val SUPPORTED_MODELS: List<String> = listOf(
-            "MiniMax-M2",
-            "MiniMax-M2.5",
+            "MiniMax-M2.7",
             "MiniMax-M2.7-highspeed",
-            "MiniMax-M1",
-            "MiniMax-VL-01",
+            "MiniMax-M2.5",
+            "MiniMax-M2.5-highspeed",
+            "MiniMax-M2.1",
+            "MiniMax-M2.1-highspeed",
         )
     }
 }

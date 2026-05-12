@@ -145,7 +145,11 @@ class AgentLoop @Inject constructor(
                 ),
             )
 
-            if (toolCalls.isEmpty() || finishReason != "tool_calls") {
+            // MiniMax (per function-call docs) reports `tool_use`; OpenAI-compat
+            // implementations also return `tool_calls`. Treat both as the signal
+            // that the next iteration should execute tools + resume.
+            val toolFinish = finishReason == "tool_calls" || finishReason == "tool_use"
+            if (toolCalls.isEmpty() || !toolFinish) {
                 emit(Turn.Finished(lastAssistantText, iterations = iter))
                 return@flow
             }

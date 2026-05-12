@@ -18,8 +18,10 @@ data class ChatRequest(
     val tools: List<Tool>? = null,
     @SerialName("tool_choice") val toolChoice: String? = null,    // "auto" | "none" | …
     val stream: Boolean = true,
+    /** MiniMax range is (0, 1]; default 1.0 on M2.7. Leaving null defers to model default. */
     val temperature: Double? = null,
-    @SerialName("max_tokens") val maxTokens: Int? = null,
+    /** MiniMax docs use `max_completion_tokens` (OpenAI's newer name). Cap = 2048 on M2.7. */
+    @SerialName("max_completion_tokens") val maxCompletionTokens: Int? = null,
 )
 
 @Serializable
