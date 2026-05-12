@@ -59,6 +59,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
+    onOpenAbout: () -> Unit = {},
     vm: SettingsViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsState()
@@ -180,6 +181,13 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(16.dp))
         MemorySyncPanel()
+
+        Spacer(Modifier.height(16.dp))
+        Row(modifier = Modifier.fillMaxWidth()) {
+            TextButton(onClick = onOpenAbout) {
+                Text("${Glyph.DiamondOutline} about Mythara  ${Glyph.Arrow}", color = MytharaColors.FgMute)
+            }
+        }
 
         Spacer(Modifier.height(40.dp))
     }

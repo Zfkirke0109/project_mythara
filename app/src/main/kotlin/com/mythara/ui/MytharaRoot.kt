@@ -12,12 +12,18 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.mythara.auth.AuthState
+import com.mythara.ui.about.AboutScreen
 import com.mythara.ui.auth.AuthGate
 import com.mythara.ui.auth.AuthViewModel
 import com.mythara.ui.chat.ChatScreen
+import com.mythara.ui.secret.SecretSettingsScreen
+import com.mythara.ui.secret.SecretUnlockDialog
 import com.mythara.ui.settings.SettingsScreen
 import com.mythara.ui.theme.MytharaColors
 import com.mythara.ui.theme.MytharaTheme
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 
 /**
  * Compose root. Owns the theme. Pivots between the AuthGate and the
@@ -54,13 +60,37 @@ fun MytharaRoot(
                     errorMessage = authErrorMessage,
                 )
                 is AuthState.Unlocked -> {
+                    var secretUnlockOpen by remember { mutableStateOf(false) }
+
                     NavHost(navController = nav, startDestination = Routes.Chat) {
                         composable(Routes.Chat) {
                             ChatScreen(onOpenSettings = { nav.navigate(Routes.Settings) })
                         }
                         composable(Routes.Settings) {
-                            SettingsScreen(onBack = { nav.popBackStack() })
+                            SettingsScreen(
+                                onBack = { nav.popBackStack() },
+                                onOpenAbout = { nav.navigate(Routes.About) },
+                            )
                         }
+                        composable(Routes.About) {
+                            AboutScreen(
+                                onBack = { nav.popBackStack() },
+                                onSecretRequest = { secretUnlockOpen = true },
+                            )
+                        }
+                        composable(Routes.SecretSettings) {
+                            SecretSettingsScreen(onBack = { nav.popBackStack() })
+                        }
+                    }
+
+                    if (secretUnlockOpen) {
+                        SecretUnlockDialog(
+                            onUnlocked = {
+                                secretUnlockOpen = false
+                                nav.navigate(Routes.SecretSettings)
+                            },
+                            onDismiss = { secretUnlockOpen = false },
+                        )
                     }
                 }
             }
@@ -71,4 +101,6 @@ fun MytharaRoot(
 object Routes {
     const val Chat = "chat"
     const val Settings = "settings"
+    const val About = "about"
+    const val SecretSettings = "secret"
 }

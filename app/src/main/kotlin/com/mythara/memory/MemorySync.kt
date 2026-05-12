@@ -2,10 +2,12 @@ package com.mythara.memory
 
 import android.util.Log
 import com.mythara.data.HistoryRepository
+import com.mythara.data.MessageRow
 import com.mythara.data.SettingsStore
 import com.mythara.growth.LearningJournal
 import com.mythara.memory.github.GitHubClient
 import com.mythara.memory.github.GitHubClient.Outcome
+import com.mythara.minimax.Region
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
@@ -52,6 +54,15 @@ class MemorySync @Inject constructor(
         val message: String,
         val filesWritten: List<String> = emptyList(),
         val skipped: List<String> = emptyList(),
+    )
+
+    data class RestoreReport(
+        val ok: Boolean,
+        val message: String,
+        val learningsRestored: Int = 0,
+        val chatRowsRestored: Int = 0,
+        val settingsRestored: Boolean = false,
+        val filesRead: List<String> = emptyList(),
     )
 
     private val tag = "Mythara/Memory"
@@ -146,6 +157,129 @@ class MemorySync @Inject constructor(
             message = "Synced ${written.size} file(s) to ${cfg.owner}/${cfg.repo}.",
             filesWritten = written,
             skipped = skipped,
+        )
+    }
+
+    /**
+     * Pull from the memory repo and materialise into local stores. Semantics
+     * are REPLACE — the user explicitly confirms before this runs, and the
+     * point is to bring a fresh device back to the canonical state.
+     *
+     * Order matters:
+     *   1. manifest.json — drives the file list. If missing, the repo is
+     *      uninitialised; nothing to restore.
+     *   2. learnings/journal.jsonl — `LearningJournal.replaceAll`
+     *   3. settings/preferences.json — SettingsStore.setRegion + setModel
+     *   4. conversations per-day jsonl — chat history, bulk insert into Room
+     *
+     * The API key is *not* restored — it's intentionally per-device. The
+     * user re-enters it once on the new phone.
+     */
+    suspend fun runRestore(): RestoreReport {
+        val cfg = memorySettings.snapshot()
+        if (!cfg.configured) return RestoreReport(ok = false, message = "Set a GitHub token + repo in Settings first.")
+
+        val client = GitHubClient(cfg.pat!!)
+        when (val v = client.validateToken()) {
+            is Outcome.Ok -> Log.d(tag, "PAT ok for ${v.value} (restore)")
+            is Outcome.Unauthorized -> return RestoreReport(ok = false, message = "GitHub token rejected.")
+            else -> return RestoreReport(ok = false, message = "GitHub auth check failed.")
+        }
+
+        // 1. Read manifest
+        val manifestPath = "manifest.json"
+        val manifestRead = client.readFile(cfg.owner, cfg.repo, manifestPath)
+        if (manifestRead is Outcome.NotFound) {
+            return RestoreReport(ok = false, message = "Repo has no manifest — nothing to restore yet.")
+        }
+        if (manifestRead !is Outcome.Ok) {
+            return RestoreReport(ok = false, message = "Could not read manifest from repo.")
+        }
+        val manifest = runCatching {
+            json.decodeFromString(ManifestV1.serializer(), manifestRead.value.text)
+        }.getOrElse { return RestoreReport(ok = false, message = "Manifest is malformed.") }
+
+        var learnings = 0
+        var chatRows = 0
+        var settingsOk = false
+        val filesRead = mutableListOf(manifestPath)
+
+        // 2. learnings/journal.jsonl
+        val journalPath = "learnings/journal.jsonl"
+        if (manifest.files.containsKey(journalPath)) {
+            val r = client.readFile(cfg.owner, cfg.repo, journalPath)
+            if (r is Outcome.Ok) {
+                val entries = r.value.text.lineSequence()
+                    .filter { it.isNotBlank() }
+                    .mapNotNull {
+                        runCatching { json.decodeFromString(LearningJournal.Entry.serializer(), it) }.getOrNull()
+                    }
+                    .toList()
+                journal.replaceAll(entries)
+                learnings = entries.size
+                filesRead.add(journalPath)
+            }
+        }
+
+        // 3. settings/preferences.json
+        val prefsPath = "settings/preferences.json"
+        if (manifest.files.containsKey(prefsPath)) {
+            val r = client.readFile(cfg.owner, cfg.repo, prefsPath)
+            if (r is Outcome.Ok) {
+                val exp = runCatching {
+                    json.decodeFromString(SettingsExport.serializer(), r.value.text)
+                }.getOrNull()
+                if (exp != null) {
+                    appSettings.setRegion(Region.fromId(exp.region))
+                    appSettings.setModel(exp.model)
+                    settingsOk = true
+                    filesRead.add(prefsPath)
+                }
+            }
+        }
+
+        // 4. conversations per-day jsonl — restore every day file in the manifest
+        val chatRowsBuffer = mutableListOf<MessageRow>()
+        for (path in manifest.files.keys.filter { it.startsWith("conversations/") && it.endsWith(".jsonl") }) {
+            val r = client.readFile(cfg.owner, cfg.repo, path)
+            if (r is Outcome.Ok) {
+                r.value.text.lineSequence()
+                    .filter { it.isNotBlank() }
+                    .mapNotNull {
+                        runCatching { json.decodeFromString(ChatRowExport.serializer(), it) }.getOrNull()
+                    }
+                    .forEach { row ->
+                        chatRowsBuffer.add(
+                            MessageRow(
+                                tsMillis = row.ts,
+                                role = row.role,
+                                content = row.content,
+                                toolCallsJson = row.toolCallsJson,
+                                toolCallId = row.toolCallId,
+                                name = row.name,
+                            ),
+                        )
+                    }
+                filesRead.add(path)
+            }
+        }
+        if (chatRowsBuffer.isNotEmpty()) {
+            history.dao.clear()
+            history.dao.insertAll(chatRowsBuffer)
+            chatRows = chatRowsBuffer.size
+        }
+
+        // Update local manifest cache so next sync uses the right SHAs.
+        memorySettings.setManifestJson(json.encodeToString(ManifestV1.serializer(), manifest))
+        memorySettings.setLastSyncTs(manifest.lastSyncTsMillis)
+
+        return RestoreReport(
+            ok = true,
+            message = "Restored $learnings learning(s), $chatRows chat row(s), settings=${if (settingsOk) "ok" else "skipped"}.",
+            learningsRestored = learnings,
+            chatRowsRestored = chatRows,
+            settingsRestored = settingsOk,
+            filesRead = filesRead,
         )
     }
 

@@ -47,8 +47,14 @@ interface MessageDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(row: MessageRow): Long
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(rows: List<MessageRow>)
+
     @Query("DELETE FROM messages")
     suspend fun clear()
+
+    @Query("SELECT COUNT(*) FROM messages")
+    suspend fun count(): Int
 }
 
 @Database(entities = [MessageRow::class], version = 1, exportSchema = false)

@@ -13,12 +13,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -166,24 +168,68 @@ fun MemorySyncPanel(vm: MemorySyncViewModel = hiltViewModel()) {
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Button(
                 onClick = { vm.syncNow() },
-                enabled = !state.syncing && state.validation?.ok == true,
+                enabled = !state.syncing && !state.restoring && state.validation?.ok == true,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MytharaColors.Bok.copy(alpha = 0.95f), contentColor = MytharaColors.Bg,
                 ),
             ) {
                 Text(if (state.syncing) "${Glyph.Ellipsis} syncing" else "${Glyph.Arrow} sync now")
             }
-            state.lastResult?.let {
-                Text(
-                    text = it, color = MytharaColors.FgMute,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+            Button(
+                onClick = { vm.openRestoreConfirm() },
+                enabled = !state.syncing && !state.restoring && state.validation?.ok == true,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MytharaColors.Surface, contentColor = MytharaColors.Fg,
+                ),
+            ) {
+                Text(if (state.restoring) "${Glyph.Ellipsis} restoring" else "${Glyph.Refresh} restore")
             }
+        }
+        state.lastResult?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = it, color = MytharaColors.FgMute,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        if (state.restoreConfirmOpen) {
+            AlertDialog(
+                onDismissRequest = { vm.cancelRestore() },
+                title = {
+                    Text(
+                        text = "restore from repo?",
+                        color = MytharaColors.Fg,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                },
+                text = {
+                    Text(
+                        text = "this pulls learnings, settings, and (if synced) chat history from ${state.owner}/${state.repo}, replacing any data on this device. the api key stays local — re-enter if needed.",
+                        color = MytharaColors.FgMute,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                },
+                containerColor = MytharaColors.Surface,
+                confirmButton = {
+                    Button(
+                        onClick = { vm.confirmRestore() },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MytharaColors.Charple, contentColor = MytharaColors.Fg,
+                        ),
+                    ) { Text("${Glyph.Refresh} restore") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { vm.cancelRestore() }) {
+                        Text("cancel", color = MytharaColors.FgMute)
+                    }
+                },
+            )
         }
 
         if (state.lastSyncTs > 0) {

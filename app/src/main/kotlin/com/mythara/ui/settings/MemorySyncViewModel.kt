@@ -37,6 +37,8 @@ class MemorySyncViewModel @Inject constructor(
         val lastSyncTs: Long = 0,
         val validating: Boolean = false,
         val syncing: Boolean = false,
+        val restoring: Boolean = false,
+        val restoreConfirmOpen: Boolean = false,
         val validation: Outcome? = null,
         val lastResult: String? = null,
     )
@@ -124,6 +126,23 @@ class MemorySyncViewModel @Inject constructor(
         viewModelScope.launch {
             settings.clearPat()
             _state.update { it.copy(pat = "", validation = null) }
+        }
+    }
+
+    fun openRestoreConfirm() = _state.update { it.copy(restoreConfirmOpen = true) }
+    fun cancelRestore()       = _state.update { it.copy(restoreConfirmOpen = false) }
+
+    fun confirmRestore() {
+        _state.update { it.copy(restoring = true, restoreConfirmOpen = false, lastResult = null) }
+        viewModelScope.launch {
+            val report = runCatching { sync.runRestore() }
+                .getOrElse { MemorySync.RestoreReport(ok = false, message = it.message ?: "restore error") }
+            _state.update {
+                it.copy(
+                    restoring = false,
+                    lastResult = "${if (report.ok) "✓ restore" else "× restore"} · ${report.message}",
+                )
+            }
         }
     }
 }

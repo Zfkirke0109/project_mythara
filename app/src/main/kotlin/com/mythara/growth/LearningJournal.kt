@@ -61,6 +61,12 @@ class LearningJournal @Inject constructor(@ApplicationContext private val ctx: C
         ctx.store.edit { it.remove(keyEntries) }
     }
 
+    /** Bulk replace — used by the memory-restore flow. Caps at [MAX_ENTRIES]. */
+    suspend fun replaceAll(entries: List<Entry>) {
+        val capped = entries.sortedBy { it.tsMillis }.takeLast(MAX_ENTRIES)
+        ctx.store.edit { it[keyEntries] = json.encodeToString(serializer, capped) }
+    }
+
     companion object {
         /** Soft cap so the stub doesn't grow without bound; the real vault
          *  in M8.2 enforces this via SQLCipher TTL and CapabilityTuner rules. */
