@@ -20,6 +20,7 @@ import com.mythara.ui.about.AboutScreen
 import com.mythara.ui.auth.AuthGate
 import com.mythara.ui.auth.AuthViewModel
 import com.mythara.ui.chat.ChatScreen
+import com.mythara.ui.onboarding.OnboardingScreen
 import com.mythara.ui.secret.SecretSettingsScreen
 import com.mythara.ui.secret.SecretUnlockDialog
 import com.mythara.ui.settings.SettingsScreen
@@ -63,13 +64,35 @@ fun MytharaRoot(
     val authState by authVm.state.collectAsState()
     val nav = rememberNavController()
 
+    // First-run onboarding pivot. Sits OUTSIDE the AuthGate because
+    // half the steps deep-link to system Settings (Accessibility,
+    // Notification access, Usage access), and bouncing back through
+    // a re-lock + biometric every time would make the walkthrough
+    // unusable. Once OnboardingStore.markCompleted() lands the flag
+    // becomes true and subsequent launches go straight to the
+    // AuthGate as normal.
+    //
+    // The flag is null until DataStore resolves; we render a blank
+    // Bg-coloured surface during that one-frame window so the
+    // AuthGate doesn't briefly flash before pivoting to onboarding.
+    val rootVmEarly: RootViewModel = hiltViewModel()
+    val onboardingCompleted by rootVmEarly.onboardingCompleted.collectAsState()
+
     MytharaTheme {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MytharaColors.Bg),
         ) {
-            when (authState) {
+            when {
+                onboardingCompleted == null -> {
+                    // DataStore not resolved yet — empty bg surface for
+                    // a single frame. Keeps the AuthGate from flashing.
+                }
+                onboardingCompleted == false -> {
+                    OnboardingScreen(onComplete = { /* state flips via flow */ })
+                }
+                else -> when (authState) {
                 is AuthState.Locked -> AuthGate(
                     onUnlock = onUnlockRequest,
                     errorMessage = authErrorMessage,
@@ -157,6 +180,7 @@ fun MytharaRoot(
                             onBiometricRequest = onSecretAuthRequest,
                         )
                     }
+                }
                 }
             }
         }

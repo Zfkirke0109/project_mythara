@@ -437,6 +437,9 @@ fun SettingsScreen(
         NotificationAccessPanel()
 
         Spacer(Modifier.height(16.dp))
+        RerunOnboardingPanel()
+
+        Spacer(Modifier.height(16.dp))
         RecallPanel()
 
         Spacer(Modifier.height(16.dp))
