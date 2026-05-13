@@ -21,6 +21,7 @@ import com.mythara.minimax.models.Tool as ApiTool
 import com.mythara.minimax.models.ToolFunction
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -68,6 +69,7 @@ class ToolRegistry @Inject constructor(
     private val allowlist: com.mythara.data.AllowlistStore,
     private val confirmationSettings: ConfirmationSettings,
     private val audit: com.mythara.audit.AuditLogger,
+    private val criticalGuard: CriticalActionGuard,
 ) {
     private val tools: List<Tool> = listOf(
         timeTool, batteryTool, webFetchTool,
@@ -158,6 +160,50 @@ class ToolRegistry @Inject constructor(
         val args: JsonObject = runCatching {
             MiniMaxClient.json.decodeFromString<JsonObject>(argsJson.ifBlank { "{}" })
         }.getOrElse { JsonObject(emptyMap()) }
+
+        // Restricted-apps policy — runs BEFORE the per-tool
+        // confirmation hook because:
+        //  • A Block decision is final, no popup, no override.
+        //  • A RequireConfirm decision forces the gate to pop even
+        //    when the user's global "always confirm" toggle is off,
+        //    so booking-an-Uber-style critical actions never slip
+        //    through autopilot silently.
+        // Read tools bypass the guard entirely (see CriticalActionGuard).
+        when (val verdict = criticalGuard.evaluate(tool.name, args)) {
+            is CriticalActionGuard.Decision.Block -> {
+                audit.logToolCall(
+                    toolName = tool.name,
+                    argsJson = argsJson,
+                    ok = false,
+                    output = "blocked: ${verdict.reason}",
+                    latencyMs = 0L,
+                )
+                return ToolResult.fail(
+                    """{"error":"app_blocked","detail":${JsonPrimitive(verdict.reason)},"pkg":${JsonPrimitive(verdict.pkg)},"override":"Open the app yourself — Mythara never automates banking/payment/wallet apps."}""",
+                )
+            }
+            is CriticalActionGuard.Decision.RequireConfirm -> {
+                val req = ConfirmationGate.ConfirmRequest(
+                    id = gate.newId(tool.name),
+                    toolName = tool.name,
+                    title = "Critical action — ${verdict.pkg}?",
+                    body = verdict.reason + " Tap allow to proceed once, deny to cancel.",
+                    // No allowlistKey — by design, the user CAN'T
+                    // pre-authorise these. Every critical action gets
+                    // a fresh prompt.
+                    allowlistKey = null,
+                )
+                val decision = gate.request(req)
+                if (decision == ConfirmationGate.Decision.Deny) {
+                    audit.logUserCanceled(tool.name)
+                    return ToolResult.fail(
+                        """{"error":"user_canceled","detail":"User declined the critical-action confirmation for ${tool.name} on ${verdict.pkg}."}""",
+                    )
+                }
+                // Approved — fall through to normal execute path.
+            }
+            CriticalActionGuard.Decision.Allow -> { /* fall through */ }
+        }
 
         val confirmStub = tool.confirmationFor(args)
         if (confirmStub != null) {

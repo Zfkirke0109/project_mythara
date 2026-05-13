@@ -69,6 +69,20 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     fun currentRootNode(): AccessibilityNodeInfo? = rootInActiveWindow
 
     /**
+     * Package name of whatever's currently on screen. Pulled from the
+     * accessibility tree's root node — accurate as long as the service
+     * is granted + a window is focused. Returns null on the lock
+     * screen (no active window) or when accessibility isn't granted.
+     *
+     * Used by [com.mythara.agent.CriticalActionGuard] to refuse
+     * tap/swipe/type_text when the foreground app is in the user's
+     * blocked-apps list (banking, payment) and to force-confirm
+     * when it's a critical-action app (ride-hailing, ordering).
+     */
+    fun currentForegroundPackage(): String? =
+        runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull()
+
+    /**
      * Dispatch a system back-press. Used by [com.mythara.agent.tools.SendWhatsAppDirectTool]
      * (and future "do-thing-in-other-app-then-return" skills) to dismiss
      * the foreign app and let our chat surface come back to the front.

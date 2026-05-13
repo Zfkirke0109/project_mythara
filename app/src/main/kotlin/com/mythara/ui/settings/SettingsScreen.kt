@@ -412,6 +412,9 @@ fun SettingsScreen(
         AuditLogPanel()
 
         Spacer(Modifier.height(16.dp))
+        RestrictedAppsPanel()
+
+        Spacer(Modifier.height(16.dp))
         ConfirmationPanel()
 
         Spacer(Modifier.height(16.dp))
