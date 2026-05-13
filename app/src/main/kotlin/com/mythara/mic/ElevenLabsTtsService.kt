@@ -214,6 +214,85 @@ class ElevenLabsTtsService @Inject constructor(
     }
 
     /**
+     * One voice from the user's ElevenLabs voice library. Exposed to
+     * the UI so Settings can render a dropdown picker keyed on
+     * [name] but mapped to [voiceId] internally.
+     */
+    data class Voice(
+        val voiceId: String,
+        val name: String,
+        val category: String?,
+        val description: String? = null,
+    )
+
+    data class VoicesOutcome(
+        val ok: Boolean,
+        val voices: List<Voice> = emptyList(),
+        val detail: String? = null,
+        val code: String? = null,
+    )
+
+    /**
+     * GET /v1/voices — list every voice this key can use (premade +
+     * cloned + shared favorites). Used by Settings to build the voice
+     * dropdown so the user picks a name, not an opaque 20-char id.
+     */
+    suspend fun fetchVoices(apiKey: String): VoicesOutcome = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext VoicesOutcome(false, detail = "empty key", code = "empty")
+        val req = Request.Builder()
+            .url("$BASE_URL/v1/voices")
+            .addHeader("xi-api-key", apiKey)
+            .get()
+            .build()
+        val result = runCatching { http.newCall(req).execute() }.getOrElse {
+            return@withContext VoicesOutcome(false, detail = it.message ?: "network failure", code = "network")
+        }
+        result.use { res ->
+            val raw = res.body?.string().orEmpty()
+            if (!res.isSuccessful) {
+                val parsed = parseElevenLabsError(raw) ?: "HTTP ${res.code}"
+                Log.w(TAG, "fetchVoices ${res.code}: $raw")
+                return@withContext VoicesOutcome(false, detail = parsed, code = "http_${res.code}")
+            }
+            val parsed = runCatching {
+                json.decodeFromString(VoicesEnvelope.serializer(), raw)
+            }.getOrNull()
+                ?: return@withContext VoicesOutcome(false, detail = "couldn't parse voices response", code = "parse")
+            val voices = parsed.voices
+                .map { v ->
+                    Voice(
+                        voiceId = v.voice_id,
+                        name = v.name.ifBlank { v.voice_id.take(8) + "…" },
+                        category = v.category,
+                        description = v.description,
+                    )
+                }
+                // Premade voices first (familiar names like Rachel /
+                // Adam), then cloned/custom voices alphabetically.
+                .sortedWith(compareBy({ premadeRank(it.category) }, { it.name.lowercase() }))
+            VoicesOutcome(true, voices = voices)
+        }
+    }
+
+    private fun premadeRank(category: String?): Int = when (category) {
+        "premade" -> 0
+        "professional" -> 1
+        "cloned" -> 2
+        else -> 3
+    }
+
+    @Serializable
+    private data class VoicesEnvelope(val voices: List<VoiceDto> = emptyList())
+
+    @Serializable
+    private data class VoiceDto(
+        @kotlinx.serialization.SerialName("voice_id") val voice_id: String,
+        val name: String = "",
+        val category: String? = null,
+        val description: String? = null,
+    )
+
+    /**
      * Cheap one-shot key probe. Uses `/v1/models` rather than the
      * earlier `/v1/user` because most scoped ElevenLabs keys (in
      * particular TTS-only keys generated from the API key UI with

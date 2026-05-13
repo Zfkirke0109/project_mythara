@@ -40,6 +40,9 @@ class SettingsViewModel @Inject constructor(
         val useElevenLabs: Boolean = false,
         val elevenLabsValidating: Boolean = false,
         val elevenLabsValidation: ValidationResult? = null,
+        /** Voices fetched from /v1/voices for the dropdown picker. */
+        val elevenLabsVoices: List<com.mythara.mic.ElevenLabsTtsService.Voice> = emptyList(),
+        val elevenLabsVoicesLoading: Boolean = false,
     )
 
     data class ValidationResult(val ok: Boolean, val message: String)
@@ -61,6 +64,33 @@ class SettingsViewModel @Inject constructor(
                     useElevenLabs = snap.useElevenLabs,
                 )
             }
+            // Pre-fetch the voice library on cold start so the
+            // dropdown is populated without the user needing to tap
+            // anything. No-op if the key is empty / network is down.
+            if (!snap.elevenLabsKey.isNullOrBlank()) {
+                loadElevenLabsVoices(snap.elevenLabsKey)
+            }
+        }
+    }
+
+    /**
+     * Fetch the user's ElevenLabs voice library and stash it in
+     * state for the dropdown. Safe to call repeatedly; the inner
+     * HTTP call is short.
+     */
+    private suspend fun loadElevenLabsVoices(apiKey: String) {
+        if (apiKey.isBlank()) return
+        _state.update { it.copy(elevenLabsVoicesLoading = true) }
+        val out = runCatching { elevenLabs.fetchVoices(apiKey) }.getOrElse {
+            com.mythara.mic.ElevenLabsTtsService.VoicesOutcome(
+                ok = false, detail = it.message, code = "threw",
+            )
+        }
+        _state.update {
+            it.copy(
+                elevenLabsVoicesLoading = false,
+                elevenLabsVoices = if (out.ok) out.voices else it.elevenLabsVoices,
+            )
         }
     }
 
@@ -136,12 +166,25 @@ class SettingsViewModel @Inject constructor(
                 ),
             )
         }
+        // On a successful validate, also refresh the voice list so the
+        // dropdown is populated immediately. Don't reuse the existing
+        // list — the new key might belong to a different account.
+        if (outcome.ok) {
+            loadElevenLabsVoices(trimmed)
+        }
     }
 
     suspend fun clearElevenLabsKey() {
         store.clearElevenLabsKey()
         store.setUseElevenLabs(false)
-        _state.update { it.copy(elevenLabsKey = null, elevenLabsValidation = null, useElevenLabs = false) }
+        _state.update {
+            it.copy(
+                elevenLabsKey = null,
+                elevenLabsValidation = null,
+                useElevenLabs = false,
+                elevenLabsVoices = emptyList(),
+            )
+        }
     }
 
     suspend fun setElevenLabsVoiceId(voiceId: String) {

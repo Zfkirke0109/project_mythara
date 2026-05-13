@@ -209,9 +209,7 @@ fun SettingsScreen(
         Spacer(Modifier.height(16.dp))
         Panel("elevenlabs voice (optional)") {
             var elInput by remember { mutableStateOf(state.elevenLabsKey ?: "") }
-            var voiceInput by remember { mutableStateOf(state.elevenLabsVoiceId) }
             LaunchedEffect(state.elevenLabsKey) { elInput = state.elevenLabsKey.orEmpty() }
-            LaunchedEffect(state.elevenLabsVoiceId) { voiceInput = state.elevenLabsVoiceId }
 
             OutlinedTextField(
                 value = elInput,
@@ -229,21 +227,50 @@ fun SettingsScreen(
                 ),
                 modifier = Modifier.fillMaxWidth(),
             )
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = voiceInput,
-                onValueChange = { voiceInput = it },
-                singleLine = true,
-                label = { Text("voice id", color = MytharaColors.FgDim) },
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = MytharaColors.Fg,
-                    unfocusedTextColor = MytharaColors.Fg,
-                    focusedBorderColor = MytharaColors.Charple,
-                    unfocusedBorderColor = MytharaColors.SurfaceHigh,
-                    cursorColor = MytharaColors.Charple,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
+            Spacer(Modifier.height(10.dp))
+            // Voice dropdown — populated from /v1/voices after validate.
+            // Until the list arrives the button is dimmed and shows the
+            // current voice id verbatim; once we have the list we render
+            // names with category hints like 'Rachel · premade'.
+            var voiceMenuOpen by remember { mutableStateOf(false) }
+            val voices = state.elevenLabsVoices
+            val selectedVoice = voices.firstOrNull { it.voiceId == state.elevenLabsVoiceId }
+            val selectedLabel = when {
+                selectedVoice != null -> selectedVoice.name
+                state.elevenLabsVoicesLoading -> "${Glyph.Ellipsis} loading voices"
+                voices.isEmpty() -> "voice · ${state.elevenLabsVoiceId.take(8)}…"
+                else -> "select a voice"
+            }
+            Box {
+                Button(
+                    onClick = { if (voices.isNotEmpty()) voiceMenuOpen = true },
+                    enabled = voices.isNotEmpty(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MytharaColors.Surface,
+                        contentColor = MytharaColors.Fg,
+                        disabledContainerColor = MytharaColors.Surface,
+                        disabledContentColor = MytharaColors.FgDim,
+                    ),
+                ) {
+                    Text("$selectedLabel  ${Glyph.Arrow}")
+                }
+                DropdownMenu(expanded = voiceMenuOpen, onDismissRequest = { voiceMenuOpen = false }) {
+                    voices.forEach { v ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "${v.name} · ${v.category ?: "voice"}",
+                                    color = MytharaColors.Fg,
+                                )
+                            },
+                            onClick = {
+                                scope.launch { vm.setElevenLabsVoiceId(v.voiceId) }
+                                voiceMenuOpen = false
+                            },
+                        )
+                    }
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -254,7 +281,6 @@ fun SettingsScreen(
                         onClick = {
                             scope.launch {
                                 vm.saveAndValidateElevenLabs(elInput)
-                                vm.setElevenLabsVoiceId(voiceInput)
                             }
                         },
                         enabled = !state.elevenLabsValidating && elInput.isNotBlank(),
@@ -314,7 +340,7 @@ fun SettingsScreen(
                 }
             }
             Text(
-                text = "${Glyph.AccentBar} when on, Lumi speaks via the ElevenLabs hosted voice (model eleven_turbo_v2_5) instead of the on-device Android TTS. Get a key at elevenlabs.io/app/settings/api-keys. Default voice id is 'Rachel'; paste any voice id from your account's library. Falls back to Android TTS automatically if a call fails (network down, over quota).",
+                text = "${Glyph.AccentBar} when on, Lumi speaks via the ElevenLabs hosted voice (model eleven_turbo_v2_5) instead of the on-device Android TTS. Get a key at elevenlabs.io/app/settings/api-keys with at least 'Voices — Read' + 'Text to Speech' permissions. The voice dropdown is loaded from /v1/voices after a successful save & validate — pick any voice in your library. Falls back to Android TTS automatically if a call fails (network down, over quota).",
                 style = MaterialTheme.typography.bodySmall.copy(color = MytharaColors.FgDim),
                 modifier = Modifier.padding(top = 6.dp),
             )
