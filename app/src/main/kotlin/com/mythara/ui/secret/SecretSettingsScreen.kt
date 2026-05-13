@@ -4,6 +4,8 @@ import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+// rememberLauncherForActivityResult + ActivityResultContracts re-used by
+// the Gemma panel for SAF .task imports.
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -363,6 +365,15 @@ fun SecretSettingsScreen(
         Spacer(Modifier.height(14.dp))
 
         Panel("extractor model (Gemma 3 1B INT4, ~530MB)") {
+            // SAF picker — user selects a .task file they've already
+            // downloaded into Files / Drive / Downloads. Avoids the HF
+            // license-gating that 401s the direct URL fetch.
+            val importLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument(),
+            ) { uri ->
+                if (uri != null) vm.importGemmaFromUri(uri)
+            }
+
             when (val gs = state.gemmaModelState) {
                 is GemmaModelStore.State.Ready -> {
                     Text(
@@ -380,20 +391,31 @@ fun SecretSettingsScreen(
                 }
                 is GemmaModelStore.State.Missing -> {
                     Text(
-                        text = "${Glyph.Cross} not downloaded — semantic extraction falls back to a regex heuristic until Gemma is available.",
+                        text = "${Glyph.Cross} not loaded. semantic extraction falls back to a regex heuristic until Gemma is available.",
                         color = MytharaColors.Mustard,
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Spacer(Modifier.height(8.dp))
-                    Button(
-                        onClick = { vm.ensureGemmaModel() },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MytharaColors.Charple, contentColor = MytharaColors.Fg,
-                        ),
-                    ) { Text("${Glyph.Arrow} download Gemma (~530MB)") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { importLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MytharaColors.Charple, contentColor = MytharaColors.Fg,
+                            ),
+                        ) { Text("${Glyph.DiamondFilled} import .task file") }
+                        Button(
+                            onClick = { vm.ensureGemmaModel() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MytharaColors.Surface, contentColor = MytharaColors.Fg,
+                            ),
+                        ) { Text("${Glyph.Arrow} try direct URL") }
+                    }
                 }
                 is GemmaModelStore.State.Downloading -> Text(
-                    text = "${Glyph.Ellipsis} downloading ${gs.pct}% (${gs.bytes / 1_000_000}MB / ${gs.total / 1_000_000}MB)",
+                    text = if (gs.total > 0)
+                        "${Glyph.Ellipsis} loading ${gs.pct}% (${gs.bytes / 1_000_000}MB / ${gs.total / 1_000_000}MB)"
+                    else
+                        "${Glyph.Ellipsis} loading ${gs.bytes / 1_000_000}MB",
                     color = MytharaColors.Citron,
                     style = MaterialTheme.typography.bodyMedium,
                 )
@@ -406,11 +428,11 @@ fun SecretSettingsScreen(
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
-                            onClick = { vm.ensureGemmaModel() },
+                            onClick = { importLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MytharaColors.Charple, contentColor = MytharaColors.Fg,
                             ),
-                        ) { Text("${Glyph.Refresh} retry") }
+                        ) { Text("${Glyph.DiamondFilled} import .task file") }
                         Button(
                             onClick = { vm.forgetGemmaModel() },
                             colors = ButtonDefaults.buttonColors(
@@ -420,11 +442,11 @@ fun SecretSettingsScreen(
                     }
                 }
             }
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(10.dp))
             Text(
-                text = "${Glyph.AccentBar} Gemma runs entirely on-device. transcripts never leave the phone. extracted facts are always in English so the synced vault stays consistent.",
+                text = "${Glyph.AccentBar} download a .task file from huggingface.co/litert-community (Gemma3-1B-IT, Gemma2-2B-IT, Phi-3.5-mini-Instruct or similar) after accepting the model's license, then tap 'import .task file' and pick the downloaded file. inference runs entirely on-device; transcripts never leave the phone.",
                 color = MytharaColors.FgDim,
-                style = MaterialTheme.typography.bodySmall.copy(letterSpacing = 1.sp),
+                style = MaterialTheme.typography.bodySmall,
             )
         }
 

@@ -183,6 +183,13 @@ class SecretSettingsViewModel @Inject constructor(
         viewModelScope.launch { gemmaModel.ensureReady() }
     }
 
+    fun importGemmaFromUri(uri: android.net.Uri) {
+        viewModelScope.launch {
+            gemmaExtractor.release()
+            gemmaModel.importFromUri(uri)
+        }
+    }
+
     fun forgetGemmaModel() {
         viewModelScope.launch {
             gemmaExtractor.release()

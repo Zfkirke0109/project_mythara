@@ -1,6 +1,7 @@
 package com.mythara.secret.observe.extract.gemma
 
 import android.content.Context
+import android.net.Uri
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -96,6 +97,69 @@ class GemmaModelStore @Inject constructor(@ApplicationContext private val ctx: C
             if (sizeMarker.exists()) sizeMarker.delete()
         }
         _state.value = State.Missing
+    }
+
+    /**
+     * Import a `.task` file the user has already downloaded (typically
+     * from Hugging Face or Kaggle, after accepting Google's Gemma
+     * license). This is the no-auth path for users who don't want to
+     * paste an HF token — they grab the file once via their browser
+     * and we stream it into [modelFile].
+     *
+     * Reuses the same on-disk layout + size-marker contract as the
+     * direct-download path, so subsequent `isAvailable()` checks pass
+     * and `GemmaExtractor` can load it normally.
+     */
+    suspend fun importFromUri(uri: Uri): State = withContext(Dispatchers.IO) {
+        runCatching {
+            if (modelFile.exists()) modelFile.delete()
+            if (sizeMarker.exists()) sizeMarker.delete()
+            modelDir.mkdirs()
+
+            // ContentResolver may or may not provide a Content-Length up
+            // front depending on the document provider — Drive/Downloads
+            // usually do, generic providers may not. We render -1 for the
+            // total in that case; the UI still gets the byte count.
+            val approxSize = runCatching {
+                ctx.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
+            }.getOrNull() ?: -1L
+            _state.value = State.Downloading(0, approxSize)
+
+            val input = ctx.contentResolver.openInputStream(uri)
+                ?: error("Could not open the selected file")
+            input.use { src ->
+                FileOutputStream(modelFile).use { out ->
+                    val buf = ByteArray(128 * 1024)
+                    var read = 0L
+                    var lastReportMs = 0L
+                    while (true) {
+                        val n = src.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        read += n
+                        val now = System.currentTimeMillis()
+                        if (now - lastReportMs > PROGRESS_REPORT_MS) {
+                            lastReportMs = now
+                            _state.update { State.Downloading(read, approxSize) }
+                        }
+                    }
+                }
+            }
+
+            val size = modelFile.length()
+            if (size < MIN_VALID_BYTES) {
+                modelFile.delete()
+                error("File too small ($size bytes) — does not look like a valid .task model")
+            }
+            sizeMarker.writeText(size.toString())
+            Log.d(TAG, "imported Gemma .task ($size bytes) → ${modelFile.absolutePath}")
+            State.Ready(modelFile.absolutePath).also { _state.value = it }
+        }.getOrElse { e ->
+            Log.e(TAG, "import failed: ${e.message}", e)
+            runCatching { if (modelFile.exists()) modelFile.delete() }
+            runCatching { if (sizeMarker.exists()) sizeMarker.delete() }
+            State.Failed(e.message ?: e.javaClass.simpleName).also { _state.value = it }
+        }
     }
 
     private fun download() {
