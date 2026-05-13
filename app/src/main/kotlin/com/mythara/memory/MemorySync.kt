@@ -8,6 +8,7 @@ import com.mythara.growth.LearningJournal
 import com.mythara.memory.github.GitHubClient
 import com.mythara.memory.github.GitHubClient.Outcome
 import com.mythara.minimax.Region
+import com.mythara.secret.observe.vault.LearningVault
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.text.SimpleDateFormat
@@ -58,6 +59,7 @@ class MemorySync @Inject constructor(
     private val journal: LearningJournal,
     private val appSettings: SettingsStore,
     private val history: HistoryRepository,
+    private val vault: LearningVault,
 ) {
     data class Report(
         val ok: Boolean,
@@ -145,8 +147,38 @@ class MemorySync @Inject constructor(
                 "mythara: bridge MEMORY.md", written, skipped)
         }
 
-        // ---- tier placeholders. Once M8.3+ extractors populate these tiers
-        //      these `.gitkeep`-style stubs get replaced with real records.
+        // ---- semantic/<topic>.jsonl — durable extracted facts from the vault.
+        //      We sync only `tier=semantic` records, never raw transcripts
+        //      (working tier stays local-only per the privacy contract).
+        //      Records are grouped by their first `topic:*` facet so the
+        //      repo's semantic/ directory reads like a Karpathy-style wiki.
+        val unsynced = vault.unsyncedRecords()
+        if (unsynced.isNotEmpty()) {
+            val semanticOnly = unsynced.filter { it.tier == Tier.Semantic.code }
+            val byTopic: Map<String, List<com.mythara.secret.observe.vault.LearningEntity>> =
+                semanticOnly.groupBy { entity ->
+                    val facets = vault.decodeFacets(entity)
+                    facets.firstOrNull { it.startsWith("topic:") }?.removePrefix("topic:")?.ifBlank { "misc" } ?: "misc"
+                }
+            for ((topic, records) in byTopic) {
+                val body = records.joinToString("\n") { entity ->
+                    json.encodeToString(MemoryRecord.serializer(), vault.toMemoryRecord(entity))
+                }
+                val path = "${Tier.Semantic.dir}/$topic.jsonl"
+                putWithCache(client, cfg, path, body, manifest,
+                    "mythara: semantic/$topic (+${records.size})", written, skipped)
+                // Mark these as synced so subsequent runs don't re-push them
+                // until/unless they're updated.
+                val syncTs = System.currentTimeMillis()
+                for (r in records) vault.markSynced(r.id, syncTs)
+            }
+            // working-tier records (raw transcripts) are deliberately NOT
+            // synced; leave them as unsynced=true forever in the local vault.
+        }
+
+        // ---- tier placeholders for episodic/procedural. semantic/ has
+        //      real content above (or will once Observe runs); we still
+        //      seed it with .gitkeep on the first sync if no records yet.
         for (tier in TIER_PLACEHOLDERS) {
             val path = "${tier.dir}/.gitkeep"
             if (!manifest.files.containsKey(path)) {
@@ -434,6 +466,8 @@ class MemorySync @Inject constructor(
         private const val README_PATH = "README.md"
         private const val MEMORY_PATH = "MEMORY.md"
         private const val MEMORY_BRIDGE_CAP = 50
+        // semantic/ is populated by the vault sync above when there are
+        // records; still seeded as a placeholder for fresh repos.
         private val TIER_PLACEHOLDERS = listOf(Tier.Episodic, Tier.Semantic, Tier.Procedural)
 
         private val PLACEHOLDER_BODY = """

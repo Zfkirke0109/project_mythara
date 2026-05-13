@@ -8,10 +8,13 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.mythara.secret.SecretAuthStore
+import com.mythara.memory.Tier
 import com.mythara.secret.observe.ObserveSession
 import com.mythara.secret.observe.ObserveState
 import com.mythara.secret.observe.ObserveStore
 import com.mythara.secret.observe.embed.EmbeddingsModelStore
+import com.mythara.secret.observe.vault.LearningEntity
+import com.mythara.secret.observe.vault.LearningVault
 import com.mythara.secret.observe.vosk.VoskModelStore
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -36,6 +39,7 @@ class SecretSettingsViewModel @Inject constructor(
     private val embedModel: EmbeddingsModelStore,
     private val session: ObserveSession,
     private val secretAuth: SecretAuthStore,
+    private val vault: LearningVault,
 ) : ViewModel() {
 
     data class State(
@@ -51,12 +55,25 @@ class SecretSettingsViewModel @Inject constructor(
         val recentTranscripts: List<TranscriptPreview> = emptyList(),
         /** True when the user has opted into biometric unlock for Secret mode. */
         val biometricUnlock: Boolean = false,
+        val vaultCount: Int = 0,
+        val recentLearnings: List<VaultPreview> = emptyList(),
     ) {
         val readyToStart: Boolean
             get() = micGranted && (!notifRequired || notifGranted) && modelState is VoskModelStore.State.Ready
     }
 
     data class TranscriptPreview(val tsMs: Long, val text: String)
+
+    data class VaultPreview(
+        val id: String,
+        val tsMs: Long,
+        val tier: String,
+        val src: String,
+        val content: String,
+        val facets: List<String>,
+        val seen: Int,
+        val hasEmbedding: Boolean,
+    )
 
     private val _state = MutableStateFlow(State(observeState = store.state.value))
     val state: StateFlow<State> = _state.asStateFlow()
@@ -81,6 +98,28 @@ class SecretSettingsViewModel @Inject constructor(
         viewModelScope.launch {
             secretAuth.useBiometricFlow().collect { enabled ->
                 _state.update { it.copy(biometricUnlock = enabled) }
+            }
+        }
+        viewModelScope.launch {
+            vault.observeCount().collect { c ->
+                _state.update { it.copy(vaultCount = c) }
+            }
+        }
+        viewModelScope.launch {
+            vault.observeRecent(MAX_PREVIEW).collect { rows ->
+                val previews = rows.map { row ->
+                    VaultPreview(
+                        id = row.id,
+                        tsMs = row.tsMillis,
+                        tier = row.tier,
+                        src = row.src,
+                        content = row.content,
+                        facets = vault.decodeFacets(row),
+                        seen = row.seen,
+                        hasEmbedding = row.embedding != null,
+                    )
+                }
+                _state.update { it.copy(recentLearnings = previews) }
             }
         }
         refreshPermission()
@@ -190,6 +229,7 @@ class SecretSettingsViewModel @Inject constructor(
         viewModelScope.launch {
             voskModel.forgetModel()
             embedModel.forgetModel()
+            vault.clear()
             refreshTranscripts()
         }
     }

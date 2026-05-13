@@ -361,6 +361,71 @@ fun SecretSettingsScreen(
 
         Spacer(Modifier.height(14.dp))
 
+        Panel("learning vault (durable)") {
+            Text(
+                text = "${state.vaultCount} record(s) stored locally — working-tier transcripts + heuristic-extracted semantic facts. semantic records sync to your GitHub memory repo; working stays on-device.",
+                color = MytharaColors.FgDim,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(8.dp))
+            if (state.recentLearnings.isEmpty()) {
+                Text(
+                    text = "${Glyph.CircleOutline} no learnings yet.",
+                    color = MytharaColors.FgMute,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                state.recentLearnings.forEach { lp ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Text(
+                            text = when (lp.tier) {
+                                "s" -> Glyph.DiamondFilled
+                                "w" -> Glyph.Dot
+                                else -> Glyph.CircleOutline
+                            },
+                            color = when (lp.tier) {
+                                "s" -> MytharaColors.Charple
+                                "w" -> MytharaColors.Bok
+                                else -> MytharaColors.FgMute
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(end = 6.dp),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = lp.content.take(120) + if (lp.content.length > 120) "…" else "",
+                                color = MytharaColors.Fg,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Text(
+                                text = buildString {
+                                    append(java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(lp.tsMs)))
+                                    append(" · ").append(lp.src)
+                                    if (lp.seen > 1) append(" · ×${lp.seen}")
+                                    if (lp.hasEmbedding) append(" · emb")
+                                },
+                                color = MytharaColors.FgDim,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "${Glyph.AccentBar} ${Glyph.DiamondFilled} = semantic (synced) · ${Glyph.Dot} = working (local-only)",
+                color = MytharaColors.FgDim,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        Spacer(Modifier.height(14.dp))
+
         Panel("recent transcripts (this device only)") {
             Text(
                 text = "${state.recentTranscripts.size} stored locally · session total: ${state.transcriptCount}",

@@ -3,7 +3,11 @@ package com.mythara.secret.observe
 import android.content.Context
 import android.util.Log
 import com.mythara.growth.LearningJournal
+import com.mythara.memory.Tier
+import com.mythara.secret.observe.embed.EmbeddingsModelStore
 import com.mythara.secret.observe.embed.LocalEmbedder
+import com.mythara.secret.observe.extract.LearningExtractor
+import com.mythara.secret.observe.vault.LearningVault
 import com.mythara.secret.observe.vosk.VoskAsr
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +52,8 @@ class ObserveSession @Inject constructor(
     @dagger.hilt.android.qualifiers.ApplicationContext private val ctx: Context,
     private val asr: VoskAsr,
     private val embedder: LocalEmbedder,
+    private val vault: LearningVault,
+    private val extractor: LearningExtractor,
     private val journal: LearningJournal,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -129,34 +135,69 @@ class ObserveSession @Inject constructor(
         runCatching { txtFile.writeText(text, Charsets.UTF_8) }
 
         // Embedding sidecar: 100-dim float32 vector (little-endian, ~400B).
-        // Best-effort — if the embedder isn't ready yet, the transcript is
-        // still captured. M8.3 SelfOrganizer back-fills missing embeddings
-        // on its nightly pass.
-        var embedded = false
-        var embedDim = 0
+        // Best-effort — if the embedder isn't ready yet, the transcript
+        // is still captured. M8.3 SelfOrganizer will back-fill missing
+        // embeddings on its nightly pass.
+        var transcriptEmbedding: FloatArray? = null
+        var embModelId: String? = null
         if (embedder.isReady()) {
             runCatching {
                 val vec = embedder.embed(text)
                 val vecFile = File(dir, "$base.vec")
                 vecFile.writeBytes(LocalEmbedder.encode(vec))
-                embedded = true
-                embedDim = vec.size
+                transcriptEmbedding = vec
+                embModelId = EmbeddingsModelStore.MODEL_ID
             }.onFailure { e ->
                 android.util.Log.w(TAG, "embed failed: ${e.message}")
             }
         }
 
+        // ---- Vault writes ----
+        // 1. Working-tier record holding the raw transcript text + its
+        //    embedding. Stays local; never synced (see MemorySync filter).
+        val refId = "transcript:$base"
+        vault.add(
+            content = text,
+            tier = Tier.Working,
+            src = "observe:vosk",
+            facets = listOf("kind:transcript"),
+            embedding = transcriptEmbedding,
+            embModel = embModelId,
+            ref = refId,
+            conf = 0.9,
+            now = now,
+        )
+
+        // 2. Heuristic-extracted semantic facts. These DO sync — they're
+        //    durable observations about the user, not raw audio content.
+        //    Quality is coarse today; M8.2.1 replaces this with Gemma.
+        var semanticCount = 0
+        for (fact in extractor.extract(text)) {
+            val factEmbedding = if (embedder.isReady()) {
+                runCatching { embedder.embed(fact.content) }.getOrNull()
+            } else null
+            val added = vault.add(
+                content = fact.content,
+                tier = Tier.Semantic,
+                src = "extract:heuristic",
+                facets = fact.facets,
+                embedding = factEmbedding,
+                embModel = if (factEmbedding != null) EmbeddingsModelStore.MODEL_ID else null,
+                ref = refId,
+                conf = fact.conf,
+                now = now,
+            )
+            if (added) semanticCount++
+        }
+
         // Metadata-only journal entry — never the transcript text.
         val wordCount = text.split(Regex("\\s+")).filter { it.isNotBlank() }.size
+        val embedNote = transcriptEmbedding?.let { "${it.size}-dim emb" } ?: "no emb"
         journal.append(
             LearningJournal.Entry(
                 tsMillis = now,
                 kind = "observe",
-                note = if (embedded) {
-                    "captured transcript ($wordCount words, ${embedDim}-dim embedding)"
-                } else {
-                    "captured transcript ($wordCount words; embedding skipped)"
-                },
+                note = "captured transcript ($wordCount words, $embedNote, $semanticCount semantic facts)",
             ),
         )
     }
