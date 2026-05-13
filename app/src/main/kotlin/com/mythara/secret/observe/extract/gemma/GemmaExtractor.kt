@@ -100,6 +100,41 @@ class GemmaExtractor @Inject constructor(
     suspend fun extract(transcript: String): List<LearningExtractor.Extracted> =
         extractWithMood(transcript).facts
 
+    /**
+     * Summarise a chunk of text into one short paragraph. Used by
+     * [com.mythara.agent.EpisodicPromoter] to compress a cluster of
+     * working-tier transcripts into a single episodic-tier record.
+     *
+     * Returns null if Gemma isn't loaded or the inference fails.
+     * Prompt asks for third-person past tense focused on durable
+     * content, so summaries flow naturally as "memory" rather than
+     * raw transcripts.
+     */
+    suspend fun summarise(text: String, maxLen: Int = MAX_SUMMARY_LEN): String? {
+        if (text.isBlank()) return null
+        if (!store.isAvailable()) return null
+        return withContext(Dispatchers.Default) {
+            runCatching {
+                val eng = ensureEngine() ?: return@runCatching null
+                val prompt = buildSummarisePrompt(text)
+                val reply: Message = eng.createConversation().use { conv ->
+                    conv.sendMessage(Message.of(prompt))
+                }
+                reply.text().trim().take(maxLen).ifBlank { null }
+            }.getOrElse { e ->
+                Log.w(TAG, "summarise failed: ${e.message}")
+                null
+            }
+        }
+    }
+
+    private fun buildSummarisePrompt(text: String): String = buildString {
+        append(SUMMARISE_PROMPT)
+        append("\n\nText:\n```\n")
+        append(text.take(MAX_SUMMARISE_INPUT))
+        append("\n```\n\nReturn the summary now (no prefix, no quotes, just the summary text).")
+    }
+
     fun release() {
         runCatching { engine?.close() }
         engine = null
@@ -274,6 +309,18 @@ class GemmaExtractor @Inject constructor(
         private const val TAG = "Mythara/Gemma"
         private const val MAX_TRANSCRIPT_CHARS = 2_000
         private const val MAX_CONTENT_LEN = 200
+        private const val MAX_SUMMARISE_INPUT = 4_000
+        private const val MAX_SUMMARY_LEN = 400
+
+        private const val SUMMARISE_PROMPT = """You summarise conversational text into one short paragraph.
+
+ALL output is in English. Use clear, natural third-person past tense referring to the speaker as "the user". Focus on durable content — decisions, plans, named entities, opinions — over filler. Keep the summary to 2-4 sentences (~300 chars). Don't quote verbatim; condense.
+
+Example:
+  Input: "I was thinking about getting a new bike. Maybe a Specialized. The blue one looks nice."
+  Output: The user considered buying a new Specialized bike, leaning toward the blue model.
+
+Do NOT include preamble like "Summary:" or "The text says". Start directly with the summary."""
 
         /**
          * Allowed mood labels. Conservative set — large enough to be

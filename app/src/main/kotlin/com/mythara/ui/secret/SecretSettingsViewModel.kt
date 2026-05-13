@@ -50,6 +50,7 @@ class SecretSettingsViewModel @Inject constructor(
     private val secretAuth: SecretAuthStore,
     private val vault: LearningVault,
     private val semanticExtractor: com.mythara.secret.observe.extract.SemanticExtractor,
+    private val episodicPromoter: com.mythara.agent.EpisodicPromoter,
 ) : ViewModel() {
 
     data class State(
@@ -77,6 +78,7 @@ class SecretSettingsViewModel @Inject constructor(
         /** Result of the most recent "Try Gemma" tap; null when never tested. */
         val gemmaProbe: GemmaProbe = GemmaProbe.Idle,
         val gemmaEnabled: Boolean = false,
+        val episodicReport: EpisodicReport = EpisodicReport.Idle,
     ) {
         val readyToStart: Boolean
             get() = micGranted && (!notifRequired || notifGranted) && modelState is VoskModelStore.State.Ready
@@ -88,6 +90,19 @@ class SecretSettingsViewModel @Inject constructor(
         data object Running : GemmaProbe
         data class Ok(val sampleOutput: String) : GemmaProbe
         data class Failed(val message: String) : GemmaProbe
+    }
+
+    /** Outcome of a manual episodic-promotion run. */
+    sealed interface EpisodicReport {
+        data object Idle : EpisodicReport
+        data object Running : EpisodicReport
+        data class Ok(
+            val workingSeen: Int,
+            val clustersFound: Int,
+            val episodicCreated: Int,
+            val skippedReason: String? = null,
+        ) : EpisodicReport
+        data class Failed(val message: String) : EpisodicReport
     }
 
     data class TranscriptPreview(val tsMs: Long, val text: String)
@@ -255,6 +270,32 @@ class SecretSettingsViewModel @Inject constructor(
         viewModelScope.launch {
             semanticExtractor.setGemmaEnabled(value)
             _state.update { it.copy(gemmaEnabled = value) }
+        }
+    }
+
+    /**
+     * Trigger an episodic-promotion run now, bypassing the nightly
+     * WorkManager cadence. Useful for verifying the Gemma
+     * summarisation path end-to-end without waiting for the next
+     * tick. Stamps `episodicReport` in state for the UI to render.
+     */
+    fun runEpisodicPromotionNow() {
+        viewModelScope.launch {
+            _state.update { it.copy(episodicReport = EpisodicReport.Running) }
+            val report = runCatching { episodicPromoter.promote() }.getOrElse { e ->
+                _state.update { it.copy(episodicReport = EpisodicReport.Failed(e.message ?: e.javaClass.simpleName)) }
+                return@launch
+            }
+            _state.update {
+                it.copy(
+                    episodicReport = EpisodicReport.Ok(
+                        workingSeen = report.workingSeen,
+                        clustersFound = report.clustersFound,
+                        episodicCreated = report.episodicCreated,
+                        skippedReason = report.skippedReason,
+                    ),
+                )
+            }
         }
     }
 

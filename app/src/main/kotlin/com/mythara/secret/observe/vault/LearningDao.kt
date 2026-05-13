@@ -19,6 +19,23 @@ interface LearningDao {
     @Query("SELECT * FROM learnings WHERE tier = :tier ORDER BY tsMillis DESC LIMIT :limit")
     suspend fun listByTier(tier: String, limit: Int = 100): List<LearningEntity>
 
+    /**
+     * For episodic promotion: pull working-tier records added since the
+     * last promotion run. Embedded records only (no point clustering
+     * without vectors).
+     */
+    @Query("""
+        SELECT * FROM learnings
+        WHERE tier = :tier AND tsMillis > :sinceMs AND embedding IS NOT NULL
+        ORDER BY tsMillis ASC
+        LIMIT :limit
+    """)
+    suspend fun listByTierSince(
+        tier: String,
+        sinceMs: Long,
+        limit: Int = 500,
+    ): List<LearningEntity>
+
     @Query("SELECT * FROM learnings WHERE synced = 0 ORDER BY tsMillis ASC LIMIT :limit")
     suspend fun listUnsynced(limit: Int = 500): List<LearningEntity>
 

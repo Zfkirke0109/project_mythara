@@ -57,20 +57,46 @@ class SelfOrganizerWorker @AssistedInject constructor(
     @Assisted params: WorkerParameters,
     private val dao: LearningDao,
     private val journal: LearningJournal,
+    private val episodic: EpisodicPromoter,
 ) : CoroutineWorker(ctx, params) {
 
     override suspend fun doWork(): Result {
-        val report = runCatching { dedupBySha() }.getOrElse {
-            Log.w(TAG, "self-organiser threw ${it.message}", it)
+        // Step 1: dedup by sha. Always runs — cheap, idempotent.
+        val dedupReport = runCatching { dedupBySha() }.getOrElse {
+            Log.w(TAG, "self-organiser dedup threw ${it.message}", it)
             return Result.retry()
         }
-        Log.d(TAG, "dedup: groups=${report.groupsConsolidated} rowsDeleted=${report.rowsDeleted}")
-        if (report.groupsConsolidated > 0) {
+        Log.d(TAG, "dedup: groups=${dedupReport.groupsConsolidated} rowsDeleted=${dedupReport.rowsDeleted}")
+
+        // Step 2: episodic promotion. No-ops when Gemma isn't enabled.
+        // Wrapped in its own runCatching — a Gemma summarisation
+        // failure shouldn't fail the whole worker (dedup already
+        // succeeded), so we log + carry on.
+        val episodicReport = runCatching { episodic.promote() }.getOrElse { e ->
+            Log.w(TAG, "episodic promotion threw ${e.message}", e)
+            EpisodicPromoter.Report(0, 0, 0, "threw: ${e.message}")
+        }
+        Log.d(
+            TAG,
+            "episodic: seen=${episodicReport.workingSeen} clusters=${episodicReport.clustersFound} " +
+                "created=${episodicReport.episodicCreated} skip=${episodicReport.skippedReason ?: "-"}",
+        )
+
+        // Journal: combined summary so the growth log shows what happened.
+        val notes = buildList {
+            if (dedupReport.groupsConsolidated > 0) {
+                add("dedup ${dedupReport.groupsConsolidated} group(s)/${dedupReport.rowsDeleted} row(s)")
+            }
+            if (episodicReport.episodicCreated > 0) {
+                add("promoted ${episodicReport.episodicCreated} episodic record(s) from ${episodicReport.clustersFound} cluster(s)")
+            }
+        }
+        if (notes.isNotEmpty()) {
             journal.append(
                 LearningJournal.Entry(
                     tsMillis = System.currentTimeMillis(),
                     kind = "self-organiser",
-                    note = "consolidated ${report.groupsConsolidated} dup group(s); deleted ${report.rowsDeleted} row(s)",
+                    note = notes.joinToString("; "),
                 ),
             )
         }

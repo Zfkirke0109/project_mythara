@@ -640,6 +640,47 @@ fun SecretSettingsScreen(
 
         Spacer(Modifier.height(14.dp))
 
+        Panel("episodic promotion (Gemma)") {
+            val (epGlyph, epColor, epText) = when (val r = state.episodicReport) {
+                is SecretSettingsViewModel.EpisodicReport.Idle -> Triple(
+                    Glyph.CircleOutline, MytharaColors.FgMute, "not run yet",
+                )
+                is SecretSettingsViewModel.EpisodicReport.Running -> Triple(
+                    Glyph.Ellipsis, MytharaColors.Citron, "running…",
+                )
+                is SecretSettingsViewModel.EpisodicReport.Ok -> Triple(
+                    Glyph.Check, MytharaColors.Julep,
+                    "ok · ${r.workingSeen} working · ${r.clustersFound} cluster(s) · ${r.episodicCreated} episodic created" +
+                        (r.skippedReason?.let { " · skipped: $it" } ?: ""),
+                )
+                is SecretSettingsViewModel.EpisodicReport.Failed -> Triple(
+                    Glyph.Cross, MytharaColors.Sriracha, "failed: ${r.message}",
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(epGlyph, color = epColor, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.padding(end = 6.dp))
+                Text(epText, color = MytharaColors.Fg, style = MaterialTheme.typography.bodySmall)
+            }
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = { vm.runEpisodicPromotionNow() },
+                enabled = state.episodicReport !is SecretSettingsViewModel.EpisodicReport.Running &&
+                    state.gemmaEnabled,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MytharaColors.Charple, contentColor = MytharaColors.Fg,
+                ),
+            ) { Text("${Glyph.Arrow} promote now") }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "${Glyph.AccentBar} clusters recent working-tier transcripts by embedding similarity, then Gemma summarises each cluster into a single episodic-tier record. Runs nightly via WorkManager too; this button bypasses the cadence for testing. Needs Gemma probed + enabled.",
+                color = MytharaColors.FgDim,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        Spacer(Modifier.height(14.dp))
+
         Panel("learning vault (durable)") {
             Text(
                 text = "${state.vaultCount} record(s) stored locally — working-tier transcripts + heuristic-extracted semantic facts. semantic records sync to your GitHub memory repo; working stays on-device.",
