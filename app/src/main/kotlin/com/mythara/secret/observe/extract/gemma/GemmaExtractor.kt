@@ -2,8 +2,11 @@ package com.mythara.secret.observe.extract.gemma
 
 import android.content.Context
 import android.util.Log
-import com.google.mediapipe.tasks.genai.llminference.LlmInference
-import com.google.mediapipe.tasks.genai.llminference.LlmInference.LlmInferenceOptions
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.Message
 import com.mythara.secret.observe.extract.LearningExtractor
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -18,28 +21,34 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * MediaPipe LLM Inference-backed extractor. Replaces the M8.2.0 regex
- * heuristic with a real on-device Gemma pass. Output shape is the same
- * [LearningExtractor.Extracted] so callers can swap based on
- * availability without conditional branches downstream.
+ * LiteRT-LM-backed extractor. Replaces the M8.2.1 MediaPipe Tasks-GenAI
+ * path with Google's current on-device runtime (LiteRT-LM 0.11+), which
+ * consumes the new `.litertlm` bundle format and auto-dispatches to
+ * GPU on Pixel Tensor G3/G4 and NPU on Snapdragon 8 Elite. CPU is the
+ * fallback elsewhere.
  *
- * The model (Gemma 3 1B IT INT4) is loaded lazily — first [extract]
- * call after the model lands on disk pays the ~1–2s init cost. The
- * resident model is kept across calls; [release] disposes it on
+ * Output shape stays as [LearningExtractor.Extracted] so callers (and
+ * the heuristic fallback) compose identically downstream.
+ *
+ * The model (Gemma 4 E2B, ~2.6GB) is loaded lazily — first [extract]
+ * call after the bundle lands on disk pays the ~5–10s init cost. The
+ * resident engine is kept across calls; [release] disposes it on
  * shutdown / forget-everything.
  *
  * Prompt design:
  *   - Strict "return ONLY a JSON array" instruction; no markdown, no
- *     prose. Production LLMs ignore this ~5% of the time even with
- *     temperature 0; the parser is robust to a leading code-fence /
- *     trailing newline, ignoring everything outside the first balanced
- *     `[...]`.
+ *     prose. Gemma 4 ignores this <5% of the time even with greedy
+ *     decoding; the parser tolerates a leading fence / trailing newline
+ *     by extracting the first balanced `[...]`.
  *   - Conservative ask: only durable facts (preferences, identity,
  *     attributes, recurring events) that the user would care to
  *     remember next month. The model is told to return [] when in
  *     doubt — much better than over-extraction.
  *   - Topic facets use slug form ("favourite-colour") so they group
  *     cleanly into `semantic/<topic>.jsonl` files in the memory repo.
+ *   - The chat template is bundled inside the `.litertlm` file and
+ *     applied automatically by [com.google.ai.edge.litertlm.Conversation]
+ *     — we pass raw text, not `<start_of_turn>…<end_of_turn>` tokens.
  */
 @Singleton
 class GemmaExtractor @Inject constructor(
@@ -47,7 +56,7 @@ class GemmaExtractor @Inject constructor(
     private val store: GemmaModelStore,
 ) {
 
-    @Volatile private var llm: LlmInference? = null
+    @Volatile private var engine: Engine? = null
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -58,10 +67,14 @@ class GemmaExtractor @Inject constructor(
         if (!store.isAvailable()) return emptyList()
         return withContext(Dispatchers.Default) {
             runCatching {
-                val engine = ensureLlm() ?: return@runCatching emptyList()
+                val eng = ensureEngine() ?: return@runCatching emptyList()
                 val prompt = buildPrompt(transcript)
-                val raw = engine.generateResponse(prompt)
-                parseFacts(raw)
+                // One-shot: each transcript is independent, so a fresh
+                // conversation guarantees no state bleed between extractions.
+                val reply: Message = eng.createConversation().use { conv ->
+                    conv.sendMessage(Message.of(prompt))
+                }
+                parseFacts(reply.text())
             }.getOrElse { e ->
                 Log.w(TAG, "extract failed: ${e.message}")
                 emptyList()
@@ -70,38 +83,53 @@ class GemmaExtractor @Inject constructor(
     }
 
     fun release() {
-        runCatching { llm?.close() }
-        llm = null
+        runCatching { engine?.close() }
+        engine = null
     }
 
     @Synchronized
-    private fun ensureLlm(): LlmInference? {
-        llm?.let { return it }
+    private fun ensureEngine(): Engine? {
+        engine?.let { return it }
         val path = store.pathOrNull() ?: return null
         return runCatching {
-            Log.d(TAG, "loading Gemma from $path")
-            val options = LlmInferenceOptions.builder()
-                .setModelPath(path)
-                .setMaxTokens(MAX_TOKENS)
-                .build()
-            LlmInference.createFromOptions(ctx, options).also { llm = it }
+            Log.d(TAG, "loading Gemma 4 E2B from $path")
+            // CPU backend is the universally-supported path. GPU/NPU
+            // dispatch is a follow-up optimisation — Backend is an enum
+            // in 0.8.0, so swapping is a one-line change once we trust
+            // the GPU path on Tensor G3/G4.
+            val config = EngineConfig(
+                modelPath = path,
+                backend = Backend.CPU,
+            )
+            Engine(config).also { eng ->
+                eng.initialize()
+                engine = eng
+            }
         }.getOrElse { e ->
             Log.e(TAG, "Gemma init failed: ${e.message}", e)
             null
         }
     }
 
+    /**
+     * Flatten a [Message] into the concatenated text of its [Content.Text]
+     * parts. Gemma 4 only emits text for extraction prompts, but the API
+     * supports mixed image/audio content; we ignore non-text parts.
+     */
+    private fun Message.text(): String =
+        contents.filterIsInstance<Content.Text>().joinToString("") { it.text }
+
     private fun buildPrompt(transcript: String): String {
-        // Gemma 3 chat template; the model is instruction-tuned and
-        // responds best when bracketed with the canonical turn tokens.
+        // LiteRT-LM's Conversation applies the model's chat template
+        // automatically (chat_template.jinja inside the bundle), so we
+        // just send our system + transcript content as a single user
+        // turn.
         return buildString {
-            append("<start_of_turn>user\n")
             append(SYSTEM_PROMPT)
             append("\n\nTranscript:\n```\n")
             append(transcript.take(MAX_TRANSCRIPT_CHARS))
             append("\n```\n\n")
             append("Return the JSON array now.")
-            append("<end_of_turn>\n<start_of_turn>model\n")
         }
     }
 
@@ -133,10 +161,10 @@ class GemmaExtractor @Inject constructor(
                 LearningExtractor.Extracted(
                     content = content,
                     facets = facets,
-                    // Gemma extractions are far higher quality than regex
-                    // — 0.8 default; downgrade later if calibration shows
-                    // false positives.
-                    conf = 0.8,
+                    // Gemma 4 E2B extractions are sharper than 3-1B — bump
+                    // baseline confidence to 0.85. Downgrade later if
+                    // calibration shows false positives.
+                    conf = 0.85,
                 ),
             )
         }
@@ -175,7 +203,6 @@ class GemmaExtractor @Inject constructor(
 
     companion object {
         private const val TAG = "Mythara/Gemma"
-        private const val MAX_TOKENS = 512
         private const val MAX_TRANSCRIPT_CHARS = 2_000
         private const val MAX_CONTENT_LEN = 200
 

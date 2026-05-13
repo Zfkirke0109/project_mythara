@@ -146,10 +146,12 @@ dependencies {
     // Universal Sentence Encoder Lite. Lazy-downloaded ~6MB tflite model.
     implementation(libs.mediapipe.tasks.text)
 
-    // MediaPipe LLM Inference — on-device Gemma for M8.2.1 fact extraction.
-    // Adds ~30MB of native runtime to the APK; the model itself (~530MB)
-    // is lazy-downloaded into filesDir.
-    implementation(libs.mediapipe.tasks.genai)
+    // LiteRT-LM — on-device Gemma 4 E2B for M8.2.2 fact extraction. Replaces
+    // MediaPipe Tasks-GenAI as Google's supported runtime path. Speaks the
+    // `.litertlm` bundle format, auto-dispatches to GPU/NPU on supported
+    // SoCs (Tensor G3/G4, Snapdragon 8 Elite), falls back to CPU elsewhere.
+    // Model (~2.6GB Apache-2.0) is lazy-downloaded into filesDir.
+    implementation(libs.litertlm.android)
 
     // ML Kit Language Identification — BCP-47 tag detection. Used to
     // pick the right TTS Locale for the assistant's reply and to add

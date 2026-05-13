@@ -19,18 +19,23 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Lazy fetcher for the Gemma .task bundle that powers M8.2.1's
- * on-device fact extractor. Same self-healing pattern as
+ * Lazy fetcher for the Gemma 4 E2B `.litertlm` bundle that powers
+ * M8.2.2's on-device fact extractor. Same self-healing pattern as
  * [com.mythara.secret.observe.vosk.VoskModelStore]: download to a
  * known path, sidecar marker records the verified Content-Length,
  * partial / truncated files don't fool subsequent retries.
  *
  * On-disk path:
- *   filesDir/gemma/gemma3-1b-it-int4.task   (~530MB)
- *   filesDir/gemma/gemma3-1b-it-int4.task.size  (Content-Length marker)
+ *   filesDir/gemma/gemma-4-E2B-it.litertlm        (~2.6GB)
+ *   filesDir/gemma/gemma-4-E2B-it.litertlm.size   (Content-Length marker)
+ *
+ * Gemma 4 E2B is Apache 2.0 — anonymous downloads succeed, no HF token
+ * required. The store still injects [HuggingFaceTokenStore] and forwards
+ * a Bearer header when a token is saved (harmless for Apache-2.0 endpoints,
+ * useful if we ever point [MODEL_URL] at a gated mirror).
  *
  * The download URL points at the litert-community mirror on Hugging
- * Face, which serves pre-bundled MediaPipe .task files without auth.
+ * Face, which hosts the `.litertlm` bundle for the LiteRT-LM runtime.
  * If Hugging Face ever moves the file, swap [MODEL_URL] for whatever
  * mirror is currently authoritative — no other code change needed.
  */
@@ -91,10 +96,11 @@ class GemmaModelStore @Inject constructor(
                 runCatching { if (modelFile.exists()) modelFile.delete() }
                 runCatching { if (sizeMarker.exists()) sizeMarker.delete() }
                 val msg = e.message ?: e.javaClass.simpleName
-                // Soften the 401 message with a hint about the token path —
-                // most failures with HF-hosted Gemma will land here.
-                val friendlier = if (msg.contains("401")) {
-                    "$msg — add an HF token in the panel below, or import a .task manually."
+                // Gemma 4 E2B is Apache 2.0 so 401 is unlikely here, but keep
+                // the friendly hint anyway in case we ever repoint at a gated
+                // mirror or the user is rate-limited.
+                val friendlier = if (msg.contains("401") || msg.contains("403")) {
+                    "$msg — try the manual `.litertlm` import instead."
                 } else msg
                 State.Failed(friendlier)
             }.also { _state.value = it }
@@ -110,11 +116,10 @@ class GemmaModelStore @Inject constructor(
     }
 
     /**
-     * Import a `.task` file the user has already downloaded (typically
-     * from Hugging Face or Kaggle, after accepting Google's Gemma
-     * license). This is the no-auth path for users who don't want to
-     * paste an HF token — they grab the file once via their browser
-     * and we stream it into [modelFile].
+     * Import a `.litertlm` file the user has already downloaded (typically
+     * from Hugging Face or Kaggle). Useful for offline installs, or if the
+     * user prefers to grab a fresh bundle via their browser rather than
+     * waiting on the in-app stream of a 2.6GB file.
      *
      * Reuses the same on-disk layout + size-marker contract as the
      * direct-download path, so subsequent `isAvailable()` checks pass
@@ -159,10 +164,10 @@ class GemmaModelStore @Inject constructor(
             val size = modelFile.length()
             if (size < MIN_VALID_BYTES) {
                 modelFile.delete()
-                error("File too small ($size bytes) — does not look like a valid .task model")
+                error("File too small ($size bytes) — does not look like a valid .litertlm bundle")
             }
             sizeMarker.writeText(size.toString())
-            Log.d(TAG, "imported Gemma .task ($size bytes) → ${modelFile.absolutePath}")
+            Log.d(TAG, "imported Gemma .litertlm ($size bytes) → ${modelFile.absolutePath}")
             State.Ready(modelFile.absolutePath).also { _state.value = it }
         }.getOrElse { e ->
             Log.e(TAG, "import failed: ${e.message}", e)
@@ -228,19 +233,19 @@ class GemmaModelStore @Inject constructor(
 
     companion object {
         private const val TAG = "Mythara/Gemma"
-        // Gemma 3 1B IT INT4 — Google-built, INT4-quantised for mobile.
-        // The litert-community on Hugging Face mirrors MediaPipe .task
-        // bundles without requiring auth.
-        const val MODEL_NAME = "gemma3-1b-it-int4.task"
+        // Gemma 4 E2B (Edge 2B effective parameters) — Apache 2.0, the
+        // mobile-first variant of Gemma 4. Bundle ships in the new
+        // `.litertlm` format consumed by the LiteRT-LM runtime.
+        const val MODEL_NAME = "gemma-4-E2B-it.litertlm"
         const val MODEL_URL =
-            "https://huggingface.co/litert-community/Gemma3-1B-IT/resolve/main/gemma3-1b-it-int4.task?download=true"
-        // 530MB is the canonical size; require at least 200MB to clear the
-        // "did we just download an HTML error page?" floor while leaving
-        // wiggle room for future Gemma-3 small models.
-        private const val MIN_VALID_BYTES = 200L * 1024 * 1024
+            "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm?download=true"
+        // Canonical size is ~2.59GB. Require at least 2GB to clear the
+        // "did we just download an HTML error page?" floor while still
+        // allowing for upstream re-quantisations that shave a few hundred MB.
+        private const val MIN_VALID_BYTES = 2_000L * 1024 * 1024
         private const val PROGRESS_REPORT_MS = 500L
 
         /** Identifier embedded in extracted-record provenance / facets. */
-        const val MODEL_ID = "gemma3-1b-it-int4"
+        const val MODEL_ID = "gemma-4-e2b-it"
     }
 }

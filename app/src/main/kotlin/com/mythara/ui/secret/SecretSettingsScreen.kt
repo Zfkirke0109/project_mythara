@@ -364,10 +364,10 @@ fun SecretSettingsScreen(
 
         Spacer(Modifier.height(14.dp))
 
-        Panel("extractor model (Gemma 3 1B INT4, ~530MB)") {
-            // SAF picker — user selects a .task file they've already
-            // downloaded into Files / Drive / Downloads. Avoids the HF
-            // license-gating that 401s the direct URL fetch.
+        Panel("extractor model (Gemma 4 E2B via LiteRT-LM, ~2.6GB)") {
+            // SAF picker — user selects a .litertlm file they've already
+            // downloaded into Files / Drive / Downloads. Backup path in
+            // case the in-app fetch is interrupted on the 2.6GB stream.
             val importLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.OpenDocument(),
             ) { uri ->
@@ -377,7 +377,7 @@ fun SecretSettingsScreen(
             when (val gs = state.gemmaModelState) {
                 is GemmaModelStore.State.Ready -> {
                     Text(
-                        text = "${Glyph.Check} Gemma ready — facts extracted in English regardless of source language.",
+                        text = "${Glyph.Check} Gemma 4 E2B ready — facts extracted in English regardless of source language.",
                         color = MytharaColors.Julep,
                         style = MaterialTheme.typography.bodyMedium,
                     )
@@ -398,17 +398,17 @@ fun SecretSettingsScreen(
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
-                            onClick = { importLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
+                            onClick = { vm.ensureGemmaModel() },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MytharaColors.Charple, contentColor = MytharaColors.Fg,
                             ),
-                        ) { Text("${Glyph.DiamondFilled} import .task file") }
+                        ) { Text("${Glyph.Arrow} download (2.6GB)") }
                         Button(
-                            onClick = { vm.ensureGemmaModel() },
+                            onClick = { importLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MytharaColors.Surface, contentColor = MytharaColors.Fg,
                             ),
-                        ) { Text("${Glyph.Arrow} try direct URL") }
+                        ) { Text("${Glyph.DiamondFilled} import .litertlm") }
                     }
                 }
                 is GemmaModelStore.State.Downloading -> Text(
@@ -432,7 +432,7 @@ fun SecretSettingsScreen(
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MytharaColors.Charple, contentColor = MytharaColors.Fg,
                             ),
-                        ) { Text("${Glyph.DiamondFilled} import .task file") }
+                        ) { Text("${Glyph.DiamondFilled} import .litertlm") }
                         Button(
                             onClick = { vm.forgetGemmaModel() },
                             colors = ButtonDefaults.buttonColors(
@@ -444,7 +444,7 @@ fun SecretSettingsScreen(
             }
             Spacer(Modifier.height(10.dp))
             Text(
-                text = "${Glyph.AccentBar} download a .task file from huggingface.co/litert-community (Gemma3-1B-IT, Gemma2-2B-IT, Phi-3.5-mini-Instruct or similar) after accepting the model's license, then tap 'import .task file' and pick the downloaded file. inference runs entirely on-device; transcripts never leave the phone.",
+                text = "${Glyph.AccentBar} Apache 2.0 — anonymous download works, no Hugging Face license to accept. Alt path: grab `gemma-4-E2B-it.litertlm` from huggingface.co/litert-community/gemma-4-E2B-it-litert-lm and import via the button above. Inference runs entirely on-device; transcripts never leave the phone.",
                 color = MytharaColors.FgDim,
                 style = MaterialTheme.typography.bodySmall,
             )

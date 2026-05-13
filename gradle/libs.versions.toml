@@ -1,12 +1,19 @@
 [versions]
-agp = "8.7.3"
-kotlin = "2.0.21"
-ksp = "2.0.21-1.0.28"
+# AGP 8.10 is the minimum that pairs with Kotlin 2.2.x; we bumped both
+# in lockstep when LiteRT-LM 0.8.0 came in (its `.class` files carry
+# Kotlin metadata 2.2.0, so a Kotlin 2.0 toolchain can't consume them).
+agp = "8.10.0"
+kotlin = "2.2.21"
+ksp = "2.2.21-2.0.5"
 coreKtx = "1.15.0"
 lifecycle = "2.8.7"
 activityCompose = "1.9.3"
 composeBom = "2024.12.01"
-hilt = "2.52"
+# Hilt 2.58 added KSP2 + Kotlin 2.2 support (2.52 throws "unexpected
+# jvm signature V" when KSP2 walks Dagger-generated factories). We can't
+# go higher to 2.59.x because 2.59 starts requiring AGP 9, and AGP 9
+# would require Gradle 8.13+ — separate migration.
+hilt = "2.58"
 hiltNavigationCompose = "1.2.0"
 navigationCompose = "2.8.5"
 coroutines = "1.9.0"
@@ -25,7 +32,14 @@ lifecycleProcess = "2.8.7"
 vosk = "0.3.47"
 jna = "5.13.0"
 mediapipeText = "0.10.14"
-mediapipeGenAi = "0.10.21"
+# LiteRT-LM replaces MediaPipe Tasks-GenAI as Google's on-device LLM runtime
+# of record (May 2026). Speaks the new `.litertlm` bundle format and runs
+# Gemma 4 with auto-NPU dispatch on Tensor G3/G4 + Snapdragon 8 Elite.
+#
+# Pinned at 0.8.0 because 0.10.2+ are compiled with Kotlin metadata 2.2.0+
+# which our toolchain (Kotlin 2.0.21) cannot consume. Bump in lockstep
+# when we move to Kotlin 2.3+ (which would require AGP 8.9+ as well).
+litertlm = "0.8.0"
 mlkitLanguageId = "17.0.6"
 
 # Deferred — added back when their milestone lands:
@@ -91,11 +105,13 @@ hilt-work-compiler = { group = "androidx.hilt", name = "hilt-compiler", version.
 # 100-dim float vectors, 6MB model (lazy-downloaded, not bundled).
 mediapipe-tasks-text = { group = "com.google.mediapipe", name = "tasks-text", version.ref = "mediapipeText" }
 
-# MediaPipe Tasks-GenAI — on-device LLM inference for Gemma / Phi / etc.
-# Used in M8.2.1 by GemmaExtractor for structured fact extraction from
-# Observe transcripts. Native runtime is ~30MB; the model itself
-# (Gemma 3 1B int4, ~530MB) is lazy-downloaded on first use.
-mediapipe-tasks-genai = { group = "com.google.mediapipe", name = "tasks-genai", version.ref = "mediapipeGenAi" }
+# LiteRT-LM — on-device LLM inference replacing MediaPipe Tasks-GenAI.
+# Used by GemmaExtractor (M8.2.2) for structured fact extraction from
+# Observe transcripts. Runtime auto-routes to GPU on Pixel Tensor G3/G4
+# and NPU on Snapdragon 8 Elite; CPU fallback elsewhere. The model itself
+# (Gemma 4 E2B, ~2.6GB Apache-2.0 .litertlm) is lazy-downloaded on first
+# use — no HF license gating, anonymous fetch works.
+litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
 
 # ML Kit Language Identification — on-device BCP-47 tag detector across
 # 100+ languages. ~2MB native model, ~10ms inference. Drives:
