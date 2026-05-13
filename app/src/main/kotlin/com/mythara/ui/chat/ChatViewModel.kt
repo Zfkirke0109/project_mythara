@@ -34,6 +34,15 @@ class ChatViewModel @Inject constructor(
     private val languageDetector: LanguageDetector,
     lumiListenerStore: com.mythara.wake.LumiListenerStore,
 ) : ViewModel() {
+    // `_ui` is declared up top so any init block can safely call
+    // `_ui.update { ... }` — Kotlin runs property initialisers + init
+    // blocks in source order, and Tts.speaking is a StateFlow that
+    // emits its initial value synchronously on subscribe, which used
+    // to NPE when its collector ran before the property below was
+    // initialised.
+    private val _ui = MutableStateFlow(UiState())
+    val ui: StateFlow<UiState> = _ui.asStateFlow()
+
     init {
         tts.init()
         // "Hey Lumi <query>" → submit the query just like a typed message.
@@ -98,9 +107,6 @@ class ChatViewModel @Inject constructor(
         /** True between the user's wake utterance and Lumi's TTS reply finishing. */
         val speaking: Boolean = false,
     )
-
-    private val _ui = MutableStateFlow(UiState())
-    val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     private val inflightTools = mutableMapOf<String, ChatItem.Tool>()
 
