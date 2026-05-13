@@ -974,6 +974,13 @@ class AgentLoop @Inject constructor(
         val profile = runCatching { contactProfiles.dao.byKey(key) }.getOrNull() ?: return ""
 
         val parts = mutableListOf<String>()
+        // USER-AUTHORED notes first and most prominent. These OVERRIDE
+        // any LLM inferences below — they're the user's authoritative
+        // statements about this contact. The model treats them as
+        // ground truth.
+        profile.userNotes?.trim()?.takeIf { it.isNotBlank() }?.let {
+            parts.add("⚠ USER'S NOTES (authoritative — these OVERRIDE any inference below):\n$it")
+        }
         profile.relationshipSummary?.takeIf { it.isNotBlank() }?.let {
             parts.add("Relationship summary: $it")
         }

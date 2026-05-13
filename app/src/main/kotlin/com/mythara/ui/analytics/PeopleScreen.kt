@@ -26,6 +26,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -65,7 +67,7 @@ import javax.inject.Inject
 
 @HiltViewModel
 class PeopleViewModel @Inject constructor(
-    repo: ContactProfileRepository,
+    private val repo: ContactProfileRepository,
     private val builder: ContactAnalyticsBuilder,
 ) : ViewModel() {
     val profiles: StateFlow<List<ContactProfileRow>> =
@@ -84,6 +86,19 @@ class PeopleViewModel @Inject constructor(
             val report = runCatching { builder.rebuildAll(force = force) }.getOrNull()
             _lastReport.value = report
             _refreshing.value = false
+        }
+    }
+
+    /**
+     * Save the user-authored notes for a contact. Uses the DAO's
+     * partial-update path so we don't race the analytics builder
+     * mid-rebuild (an upsert would replace the full row with stale
+     * derived fields).
+     */
+    fun saveUserNotes(nameKey: String, notes: String) {
+        viewModelScope.launch {
+            val normalized = notes.trim().takeIf { it.isNotEmpty() }
+            runCatching { repo.dao.updateUserNotes(nameKey, normalized) }
         }
     }
 }
@@ -133,7 +148,10 @@ fun PeopleScreen(
         Spacer(Modifier.height(12.dp))
 
         if (selected != null) {
-            ProfileDetail(selected)
+            ProfileDetail(
+                p = selected,
+                onSaveNotes = { notes -> vm.saveUserNotes(selected.nameKey, notes) },
+            )
         } else {
             ProfileList(
                 profiles = profiles,
@@ -282,7 +300,10 @@ private fun ProfileRow(p: ContactProfileRow, onTap: () -> Unit) {
 }
 
 @Composable
-private fun ProfileDetail(p: ContactProfileRow) {
+private fun ProfileDetail(
+    p: ContactProfileRow,
+    onSaveNotes: (String) -> Unit,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -311,10 +332,20 @@ private fun ProfileDetail(p: ContactProfileRow) {
             }
         }
 
-        // Key points first — this is what the user is here for before
-        // starting a conversation. Bok-bordered to make it pop.
-        val keyPoints = parseStringList(p.keyPointsJson)
+        // USER NOTES — top of the detail view. The user's authoritative
+        // statements about this contact. Editable; saved on tap.
+        // Charple-bordered so it reads as user-curated (vs the Bok of
+        // key points, which is Gemma-derived).
         Spacer(Modifier.height(16.dp))
+        UserNotesCard(
+            initial = p.userNotes.orEmpty(),
+            displayName = p.displayName,
+            onSave = onSaveNotes,
+        )
+        Spacer(Modifier.height(12.dp))
+
+        // Key points — Gemma-derived "what's happening" prep.
+        val keyPoints = parseStringList(p.keyPointsJson)
         if (keyPoints.isNotEmpty()) {
             Column(
                 modifier = Modifier
@@ -427,6 +458,99 @@ private fun ProfileDetail(p: ContactProfileRow) {
             }
         }
         Spacer(Modifier.height(40.dp))
+    }
+}
+
+@Composable
+private fun UserNotesCard(
+    initial: String,
+    displayName: String,
+    onSave: (String) -> Unit,
+) {
+    var draft by remember(initial) { mutableStateOf(initial) }
+    val dirty = draft.trim() != initial.trim()
+    val hasNotes = initial.isNotBlank()
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MytharaColors.Surface)
+            .border(1.5.dp, MytharaColors.Charple, RoundedCornerShape(10.dp))
+            .padding(14.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "${Glyph.DiamondFilled} your notes on $displayName",
+                style = MaterialTheme.typography.labelLarge.copy(color = MytharaColors.Charple),
+            )
+            if (hasNotes) {
+                Text(
+                    text = "${Glyph.Check} saved",
+                    color = MytharaColors.FgDim,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "${Glyph.AccentBar} anything you want Lumi to remember about this person — preferences, sensitive topics, relationship context, corrections to what she inferred. These notes override any LLM guesses and survive every refresh.",
+            color = MytharaColors.FgDim,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = draft,
+            onValueChange = { draft = it },
+            placeholder = {
+                Text(
+                    "e.g. \"allergic to nuts — don't suggest restaurants without checking\"; \"knows her from college\"; \"avoid bringing up her brother\"",
+                    color = MytharaColors.FgDim,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = MytharaColors.Fg,
+                unfocusedTextColor = MytharaColors.Fg,
+                focusedBorderColor = MytharaColors.Charple,
+                unfocusedBorderColor = MytharaColors.SurfaceHigh,
+                cursorColor = MytharaColors.Charple,
+            ),
+            minLines = 3,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (dirty) {
+                Text(
+                    text = "${Glyph.Ellipsis} unsaved changes",
+                    color = MytharaColors.Mustard,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else {
+                Spacer(Modifier.width(1.dp))
+            }
+            androidx.compose.material3.Button(
+                onClick = { onSave(draft) },
+                enabled = dirty,
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = MytharaColors.Charple,
+                    contentColor = MytharaColors.Fg,
+                    disabledContainerColor = MytharaColors.Surface,
+                    disabledContentColor = MytharaColors.FgDim,
+                ),
+            ) {
+                Text("${Glyph.Check} save")
+            }
+        }
     }
 }
 

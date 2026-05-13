@@ -135,6 +135,9 @@ class ContactAnalyticsBuilder @Inject constructor(
                 keyPointsJson = if (infer != null)
                     json.encodeToString(ListSerializer(String.serializer()), infer.keyPoints)
                 else existing?.keyPointsJson ?: "[]",
+                // User-authored notes are NEVER overwritten by the
+                // analytics builder — preserve from the previous row.
+                userNotes = existing?.userNotes,
                 lastBuiltMs = System.currentTimeMillis(),
             )
             repo.dao.upsert(row)

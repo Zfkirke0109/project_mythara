@@ -76,6 +76,19 @@ data class ContactProfileRow(
      * key_points describes WHAT'S HAPPENING in their life right now.
      */
     @ColumnInfo(name = "key_points_json") val keyPointsJson: String = "[]",
+    /**
+     * Free-form user-authored notes about this contact. Always
+     * preserved across rebuilds — Gemma never overwrites this field.
+     * Surfaced AT THE TOP of the detail screen and injected
+     * prominently into the auto-reply prompt as authoritative
+     * context (user-written facts override LLM inferences).
+     *
+     * Use cases: corrections ("she's allergic to nuts — important"),
+     * additional context the chat history can't have learned
+     * ("knows her from college, decade-long friendship"),
+     * explicit reminders ("don't bring up her brother").
+     */
+    @ColumnInfo(name = "user_notes") val userNotes: String? = null,
     /** Last time the analytics builder produced / updated this row. */
     @ColumnInfo(name = "last_built_ms") val lastBuiltMs: Long = 0,
 ) {
@@ -102,6 +115,15 @@ interface ContactProfileDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(row: ContactProfileRow)
 
+    /**
+     * Update only the user-authored notes without touching anything
+     * else. Avoids racing the analytics builder when the user edits
+     * notes mid-rebuild — partial updates beat the full-row replace
+     * the upsert path uses.
+     */
+    @Query("UPDATE contact_profiles SET user_notes = :notes WHERE name_key = :key")
+    suspend fun updateUserNotes(key: String, notes: String?)
+
     @Query("DELETE FROM contact_profiles WHERE name_key = :key")
     suspend fun deleteByKey(key: String)
 
@@ -109,7 +131,7 @@ interface ContactProfileDao {
     suspend fun clear()
 }
 
-@Database(entities = [ContactProfileRow::class], version = 2, exportSchema = false)
+@Database(entities = [ContactProfileRow::class], version = 3, exportSchema = false)
 abstract class ContactProfilesDb : RoomDatabase() {
     abstract fun profiles(): ContactProfileDao
 }
