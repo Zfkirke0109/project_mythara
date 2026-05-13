@@ -365,10 +365,18 @@ class AgentLoop @Inject constructor(
                     "\n\n⚠️ THIS NOTIFICATION CONTAINS AN IMAGE. Before any decision (NOSURFACE or reply), call read_recent_chat_image with app_hint=\"whatsapp\" + max_age_seconds=180 so you actually see the photo. " +
                         "If it's a meme / forwarded ad / promotional graphic, that's strong NOSURFACE signal. If it's a genuine personal moment, the reply must reference it specifically. Either way you need to SEE the image first."
                 } else ""
+                // Even non-favorites may already have an analytics
+                // profile from earlier imports / past auto-triage
+                // turns. When they do, inject the same profile block
+                // we use for favorites — relationship summary, Big
+                // Five read, notable traits, key points — so the
+                // model can tune mirror-tone replies on real signal
+                // rather than pure cold-start.
+                val triageProfileBlock = buildContactProfileBlock(parsed.sender)
                 ChatMessage(
                     role = "system",
                     content =
-                        "AUTO-TRIAGE MODE — a message arrived from someone NOT in the user's favorites. You decide whether it deserves a reply. The default answer is NO; only reply on real conversational messages from real people." + triageImageMandate + "\n\n" +
+                        "AUTO-TRIAGE MODE — a message arrived from someone NOT in the user's favorites. You decide whether it deserves a reply. The default answer is NO; only reply on real conversational messages from real people." + triageImageMandate + triageProfileBlock + "\n\n" +
                             "OUTPUT NOSURFACE (single token, no tools, no text after it) when ANY of these apply:\n" +
                             "  • Marketing / promotional / advertisement (\"50% off!\", \"new arrivals\", \"limited offer\")\n" +
                             "  • One-time codes / OTPs / verification codes (\"your code is 123456\", \"verify your account\")\n" +
@@ -1016,11 +1024,19 @@ class AgentLoop @Inject constructor(
             parts.add("Recent context worth weaving in if naturally relevant: " + keyPoints.joinToString("; "))
         }
         if (parts.isEmpty()) return ""
-        return "\n\n— What Lumi knows about ${profile.displayName} —\n" + parts.joinToString("\n") + "\n" +
-            "Use these to TUNE your reply — don't paraphrase them back to the recipient, don't mention them explicitly, " +
-            "don't recite this list. If a 'recent context' item is DIRECTLY relevant to what they just messaged, you may " +
-            "naturally acknowledge it (\"hope the thesis defense is going okay\"). Otherwise these are picking-the-right-" +
-            "register context, nothing more."
+        return "\n\n— What Lumi knows about ${profile.displayName} —\n" + parts.joinToString("\n") + "\n\n" +
+            "HOW TO USE THIS:\n" +
+            "  • TUNE the reply, never paraphrase the profile back. Don't recite the list, don't mention 'I know you have high openness', don't act on traits as facts. They're SUBTLE register hints.\n" +
+            "  • Concrete tuning recipes from the Big Five:\n" +
+            "      - High extraversion (>0.65) → looser energy, more playful, exclamation points fine, shorter sentences. Low extraversion → calmer, more measured cadence.\n" +
+            "      - High agreeableness (>0.65) → warmer phrasing, more 'we' / 'you' language, soft openings. Low agreeableness → match directness, skip the niceties, get to the point.\n" +
+            "      - High conscientiousness (>0.65) → precise wording, full sentences, follow-up offers concrete (\"I'll send the doc by 6\"). Low → flexible, less committal.\n" +
+            "      - High neuroticism (>0.65) → softer, more reassuring, validate before suggesting. Especially under stress topics, lean into 'that sounds rough' rather than problem-solving.\n" +
+            "      - High openness (>0.65) → can be more playful, abstract, riff on ideas. Low → keep it concrete, no philosophical detours.\n" +
+            "  • The TONE setting (friendly / professional / realistic) is the OUTER frame; Big Five fine-tunes WITHIN that frame.\n" +
+            "  • Notable traits + topics already discussed are CONCRETE hooks. Weave them in only when directly relevant (\"that pasta from last time looked amazing\", not \"you like pasta\").\n" +
+            "  • If a 'recent context' item is DIRECTLY relevant to what they just messaged, naturally acknowledge it (\"hope the thesis defense is going okay\"). Otherwise leave it.\n" +
+            "  • USER'S NOTES (when present) override all of this. If the user wrote 'avoid bringing up her brother', do not bring up her brother regardless of any other signal."
     }
 
     private fun fmt(v: Double?): String = if (v == null) "?" else "%.2f".format(v)
