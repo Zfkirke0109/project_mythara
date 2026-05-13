@@ -2,6 +2,7 @@ package com.mythara.agent.mood
 
 import android.util.Log
 import com.mythara.memory.Tier
+import com.mythara.secret.observe.acoustic.AcousticAnalyzer
 import com.mythara.secret.observe.vault.LearningVault
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -37,6 +38,7 @@ import javax.inject.Singleton
 @Singleton
 class ChatMoodTracker @Inject constructor(
     private val vault: LearningVault,
+    private val acoustic: AcousticAnalyzer,
 ) {
     /**
      * Score [text], persist as a vault working-tier record, return
@@ -74,6 +76,86 @@ class ChatMoodTracker @Inject constructor(
         }.onFailure { Log.w(TAG, "vault.add failed: ${it.message}") }
         Log.d(TAG, "tracked mood=$mood src=$src on '${excerpt.take(40)}…'")
         return mood
+    }
+
+    /**
+     * Track variant that incorporates raw-audio acoustic features.
+     * Used by voice-originated chat turns where [com.mythara.mic.VoicePcmRecorder]
+     * captured PCM alongside the SpeechRecognizer.
+     *
+     * Runs both the lexical scorer and [AcousticAnalyzer], fuses
+     * them via [AcousticMoodFusion], and writes a single vault row
+     * with the combined `mood:<cat>` plus the raw acoustic facets
+     * (`pitch:high`, `energy:low`, `rate:fast`) so downstream
+     * analytics + future per-user calibration can read them
+     * independently.
+     *
+     * Confidence is bumped to 0.7 when the lexical + acoustic
+     * signals agree (vs 0.5 for lexical-only), 0.6 when only
+     * acoustic produced a label.
+     *
+     * @param pcm raw Int16 mono samples from VoicePcmRecorder.
+     * @param sampleRate the rate AudioRecord ran at (typically 16000).
+     */
+    suspend fun trackVoice(
+        text: String,
+        pcm: ShortArray?,
+        sampleRate: Int,
+    ): String? {
+        val lexical = LexicalMoodScorer.score(text)
+        if (pcm == null || pcm.isEmpty()) {
+            return track(text, fromVoice = true)  // fall back to lexical-only path
+        }
+        // AcousticAnalyzer wants the transcript's word count to
+        // compute speaking rate. Use a cheap whitespace split here
+        // — accurate enough for population-level rate buckets.
+        val wordCount = text.trim().split(Regex("""\s+""")).filter { it.isNotEmpty() }.size
+        val features = runCatching {
+            acoustic.analyze(
+                pcm = pcm,
+                validSamples = pcm.size,
+                sampleRate = sampleRate,
+                wordCount = wordCount,
+            )
+        }.getOrElse {
+            Log.w(TAG, "AcousticAnalyzer.analyze threw: ${it.message}")
+            return track(text, fromVoice = true)
+        }
+
+        val fused = AcousticMoodFusion.fuse(lexical = lexical, features = features) ?: return null
+        val acousticBuckets = acoustic.bucket(features)
+        val agree = lexical != null && lexical == fused
+        val conf = when {
+            agree -> 0.75
+            lexical != null -> 0.6   // lexical present but acoustic refined
+            else -> 0.6              // acoustic-only
+        }
+
+        val excerpt = text.take(MAX_EXCERPT).trim()
+        val content = "[$fused] $excerpt"
+        val facets = buildList {
+            add("mood:$fused")
+            add("kind:chat-mood")
+            add("source:chat:voice")
+            addAll(acousticBuckets) // pitch:/energy:/rate: facets
+            if (lexical != null) add("lexical:$lexical")
+            add("f0_hz:${features.meanF0Hz.toInt()}")
+            add("rms:${"%.3f".format(features.meanRms)}")
+            add("wps:${"%.2f".format(features.wordsPerSec)}")
+            add("dur_s:${"%.1f".format(features.durationSec)}")
+        }
+        runCatching {
+            vault.add(
+                content = content,
+                tier = Tier.Working,
+                src = "chat:voice",
+                facets = facets,
+                conf = conf,
+                now = System.currentTimeMillis(),
+            )
+        }.onFailure { Log.w(TAG, "vault.add (voice) failed: ${it.message}") }
+        Log.d(TAG, "voice mood=$fused lex=$lexical acoustic=$acousticBuckets f0=${features.meanF0Hz.toInt()}Hz rms=${features.meanRms}")
+        return fused
     }
 
     companion object {

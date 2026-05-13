@@ -277,6 +277,19 @@ class ChatViewModel @Inject constructor(
         runner.submit(text, fromVoice = fromVoice)
     }
 
+    /**
+     * Voice-input variant carrying the raw PCM that
+     * [com.mythara.mic.VoicePcmRecorder] captured alongside the
+     * SpeechRecognizer. AgentRunner forwards to the acoustic-aware
+     * ChatMoodTracker.trackVoice so the fused mood (text + pitch +
+     * energy + rate) drives the response prosody.
+     */
+    fun submitVoice(text: String, pcm: ShortArray?, pcmSampleRate: Int) {
+        if (text.isBlank()) return
+        _ui.update { it.copy(thinking = true, streaming = "", needsApiKey = false, errorBanner = null) }
+        runner.submit(text, fromVoice = true, pcm = pcm, pcmSampleRate = pcmSampleRate)
+    }
+
     init {
         // Subscribe to AgentRunner's process-wide event stream so the
         // chat UI reflects whatever's happening regardless of which

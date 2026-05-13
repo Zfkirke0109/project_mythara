@@ -105,24 +105,34 @@ class AgentRunner @Inject constructor(
      *      service-stop after IDLE_TIMEOUT_MS
      */
     fun submit(text: String, fromVoice: Boolean) {
+        submit(text = text, fromVoice = fromVoice, pcm = null, pcmSampleRate = 0)
+    }
+
+    /**
+     * Variant called by voice paths that captured raw audio alongside
+     * SpeechRecognition. Runs the acoustic-aware mood tracker so the
+     * fused mood (text + pitch/energy/rate) feeds the recall trend
+     * and the agent's response prosody.
+     */
+    fun submit(text: String, fromVoice: Boolean, pcm: ShortArray?, pcmSampleRate: Int) {
         if (text.isBlank()) return
         scope.launch {
             beginTurn()
             try {
-                // Run the lexical mood scorer BEFORE the agent loop
-                // starts so the just-detected mood is in the vault
-                // when AgentLoop.submit calls recall.recentMoodTrend
-                // at the top of its iteration. This is what feeds
-                // back into both:
-                //   - the agent's "be warmer / softer" system message
-                //   - the userMoodTrend on Turn.Finished, which drives
-                //     TTS pitch/rate (Android) and stability/style
-                //     (ElevenLabs)
-                // The whole pass is microseconds + one vault row write
-                // (~10ms), so we don't perceptibly delay the user's
-                // reply.
-                runCatching { moodTracker.track(text, fromVoice) }
-                    .onFailure { Log.w(TAG, "mood track failed: ${it.message}") }
+                // Mood pre-pass. With audio: text + acoustic fusion.
+                // Without: lexical-only. Either way the just-detected
+                // mood is in the vault when AgentLoop.submit calls
+                // recall.recentMoodTrend at the top of its iteration —
+                // which feeds both the "be warmer / softer" system
+                // message and Turn.Finished.userMoodTrend (which
+                // drives TTS pitch/rate + ElevenLabs stability/style).
+                runCatching {
+                    if (pcm != null && pcm.isNotEmpty()) {
+                        moodTracker.trackVoice(text, pcm, pcmSampleRate)
+                    } else {
+                        moodTracker.track(text, fromVoice)
+                    }
+                }.onFailure { Log.w(TAG, "mood track failed: ${it.message}") }
 
                 agent.submit(text, fromVoice = fromVoice).collect { turn ->
                     _turnEvents.tryEmit(turn)

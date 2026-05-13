@@ -206,29 +206,39 @@ fun ChatScreen(
                 return@collect
             }
             android.util.Log.d("Mythara/Chat", "voice trigger from ${trigger.source}")
+            // Start a parallel raw-PCM recorder so AcousticAnalyzer can
+            // extract pitch / energy / speaking-rate from the same
+            // utterance the SpeechRecognizer is transcribing. On
+            // devices that refuse concurrent capture, start() returns
+            // false and we proceed with text-only mood scoring.
+            val pcmRecorder = com.mythara.mic.VoicePcmRecorder(ctx)
+            val pcmStarted = pcmRecorder.start()
             try {
-                // One-shot listen. Wait for the first Final or Error
-                // (firstOrNull suspends collection until the predicate
-                // matches and then cancels the upstream flow cleanly,
-                // releasing the SpeechRecognizer). This matches the
-                // "tap-to-talk" shape of Pixel Buds touch-and-hold:
-                // speak once, get answered.
+                // One-shot listen. Wait for the first Final or Error.
                 val terminal: SpeechRecognition.Event? = SpeechRecognition
                     .listen(ctx)
                     .firstOrNull { ev ->
                         ev is SpeechRecognition.Event.Final ||
                             ev is SpeechRecognition.Event.Error
                     }
+                val captured = if (pcmStarted) pcmRecorder.stop() else null
                 when (terminal) {
                     is SpeechRecognition.Event.Final -> {
                         val text = terminal.text.trim()
-                        if (text.isNotEmpty()) vm.submit(text, fromVoice = true)
+                        if (text.isNotEmpty()) {
+                            vm.submitVoice(
+                                text = text,
+                                pcm = captured?.pcm,
+                                pcmSampleRate = captured?.sampleRate ?: 0,
+                            )
+                        }
                     }
                     is SpeechRecognition.Event.Error ->
                         android.util.Log.w("Mythara/Chat", "voice trigger SR error: ${terminal.message}")
                     else -> { /* upstream cancelled before terminal — no-op */ }
                 }
             } finally {
+                pcmRecorder.release()
                 vm.micBroker.release(MicBroker.Client.CONTINUOUS_CHAT)
             }
         }
