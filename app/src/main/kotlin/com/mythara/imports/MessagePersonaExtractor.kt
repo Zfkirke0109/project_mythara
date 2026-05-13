@@ -43,6 +43,7 @@ class MessagePersonaExtractor @Inject constructor(
     private val vault: LearningVault,
     private val embedder: LocalEmbedder,
     private val gemma: GemmaExtractor,
+    private val userNameStore: com.mythara.data.UserNameStore,
 ) {
     data class Report(
         val ok: Boolean,
@@ -165,12 +166,37 @@ class MessagePersonaExtractor @Inject constructor(
         //        messages to lift contact-specific facts (their
         //        topics, their voice) and store them too.
         if (byContact.isNotEmpty()) {
-            val topContacts = byContact.take(MAX_CONTACTS_PER_IMPORT)
+            // Identify the user's likely sender name to exclude from
+            // per-contact ingestion. In a 1-on-1 export both parties
+            // show up in byContact — one is the contact, the other is
+            // the user. Ingesting both means creating a "contact"
+            // profile for yourself, which clutters the People screen
+            // and writes mirror-image data twice.
+            val userName = runCatching { userNameStore.name() }.getOrDefault("").trim()
+            val excludeUser: (String) -> Boolean = { candidate ->
+                userName.isNotEmpty() && (
+                    candidate.equals(userName, ignoreCase = true) ||
+                        // Loose match for "Ankur Nair" vs "Ankur" etc.
+                        userName.contains(candidate, ignoreCase = true) ||
+                        candidate.contains(userName, ignoreCase = true)
+                )
+            }
+            val topContacts = byContact
+                .filterNot { excludeUser(it.first) }
+                .take(MAX_CONTACTS_PER_IMPORT)
             for ((contactName, count) in topContacts) {
                 if (count < MIN_PER_CONTACT_MESSAGES) continue
                 val perContactWritten = ingestContact(source, contactName, messages, now)
                 written += perContactWritten
                 Log.d(TAG, "per-contact ingest for $contactName: $perContactWritten records")
+            }
+            if (userName.isBlank()) {
+                Log.w(
+                    TAG,
+                    "user name not set in Settings — both parties of every 1-on-1 chat will be " +
+                        "ingested as contacts. Set 'what should I call you' in Settings → User Name " +
+                        "so imports can distinguish you from your contacts.",
+                )
             }
         }
 
