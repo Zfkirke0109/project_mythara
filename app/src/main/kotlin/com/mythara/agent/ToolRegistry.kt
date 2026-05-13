@@ -58,6 +58,7 @@ class ToolRegistry @Inject constructor(
     swipeTool: com.mythara.agent.tools.SwipeTool,
     typeTextTool: com.mythara.agent.tools.TypeTextTool,
     sendWhatsAppTool: com.mythara.agent.tools.SendWhatsAppTool,
+    sendWhatsAppDirectTool: com.mythara.agent.tools.SendWhatsAppDirectTool,
     listSkillsTool: com.mythara.agent.tools.ListSkillsTool,
     getSkillTool: com.mythara.agent.tools.GetSkillTool,
     saveSkillTool: com.mythara.agent.tools.SaveSkillTool,
@@ -76,7 +77,7 @@ class ToolRegistry @Inject constructor(
         spawnAgentTool,
         smsDirectTool, placeCallDirectTool,
         tapTool, swipeTool, typeTextTool,
-        sendWhatsAppTool,
+        sendWhatsAppTool, sendWhatsAppDirectTool,
         listSkillsTool, getSkillTool, saveSkillTool, runSkillTool,
     )
     private val byName: Map<String, Tool> = tools.associateBy { it.name }

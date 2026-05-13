@@ -69,6 +69,33 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     fun currentRootNode(): AccessibilityNodeInfo? = rootInActiveWindow
 
     /**
+     * Dispatch a system back-press. Used by [com.mythara.agent.tools.SendWhatsAppDirectTool]
+     * (and future "do-thing-in-other-app-then-return" skills) to dismiss
+     * the foreign app and let our chat surface come back to the front.
+     * Returns the OS's acknowledgement bool — true == accepted.
+     */
+    fun pressBack(): Boolean =
+        runCatching { performGlobalAction(GLOBAL_ACTION_BACK) }.getOrDefault(false)
+
+    /**
+     * Bring Mythara back to the foreground after a brief excursion
+     * (e.g. WhatsApp-direct sends). Not a system gesture — relies on
+     * activity launch from a foreground service, which works because
+     * the AgentForegroundService keeps Mythara's process in the
+     * foreground-eligible bucket while it's active.
+     */
+    fun bringMytharaToFront() {
+        runCatching {
+            val intent = packageManager
+                .getLaunchIntentForPackage(packageName)
+                ?.apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT) }
+            if (intent != null) startActivity(intent)
+        }
+    }
+
+    /**
      * Dispatch a single tap at the given screen coordinates. Returns
      * true if the gesture was accepted by the system, false if the
      * service hasn't been granted gesture capability or coordinates
