@@ -36,6 +36,7 @@ class ChatViewModel @Inject constructor(
     val micBroker: com.mythara.mic.MicBroker,
     notifAutoProcessStore: com.mythara.services.NotificationAutoProcessStore,
     private val autopilotStore: com.mythara.data.AutopilotStore,
+    private val processCallNotifs: com.mythara.data.ProcessCallNotificationsStore,
     private val notifDecisionEngine: com.mythara.services.NotificationDecisionEngine,
     private val vault: com.mythara.secret.observe.vault.LearningVault,
     private val embedder: com.mythara.secret.observe.embed.LocalEmbedder,
@@ -99,6 +100,11 @@ class ChatViewModel @Inject constructor(
                         .collect { r ->
                             if (r.ongoing) return@collect
                             if (r.packageName == selfPkg) return@collect
+                            // Call notifications skipped unless the user
+                            // explicitly opted in (default off — calls
+                            // are a different interaction mode the
+                            // agent doesn't touch).
+                            if (r.looksLikeCall && !processCallNotifs.isEnabled()) return@collect
 
                             // SMART DECISION FIRST. If the auto-
                             // action store has learned to dismiss

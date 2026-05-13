@@ -77,6 +77,16 @@ class NotificationListener : NotificationListenerService() {
          * we don't process video notifications.
          */
         val looksLikeVideo: Boolean = false,
+        /**
+         * True when this notification is a phone / VoIP call. Set
+         * from Notification.category == CATEGORY_CALL (the canonical
+         * Android signal) plus a fallback check on common dialer
+         * packages + title patterns. Consumers (AutoReplyDispatcher,
+         * ChatViewModel.notif auto-process) gate on the
+         * ProcessCallNotificationsStore toggle: by default the agent
+         * never reacts to calls; the user can opt in via Settings.
+         */
+        val looksLikeCall: Boolean = false,
     )
 
     override fun onListenerConnected() {
@@ -162,6 +172,12 @@ class NotificationListener : NotificationListenerService() {
         // a SharedFlow + buffer).
         val savedImages = extractAndSaveImages(extras, sbn.key.orEmpty())
         val looksLikeVideo = looksLikeVideoNotification(text)
+        val looksLikeCall = looksLikeCallNotification(
+            category = sbn.notification?.category,
+            pkg = sbn.packageName.orEmpty(),
+            title = title,
+            text = text,
+        )
 
         val r = Recent(
             key = sbn.key.orEmpty(),
@@ -173,6 +189,7 @@ class NotificationListener : NotificationListenerService() {
             ongoing = isOngoing,
             imagePaths = savedImages,
             looksLikeVideo = looksLikeVideo,
+            looksLikeCall = looksLikeCall,
         )
         // Detect whether this is a *new* notification vs an update to an
         // existing one (sticky media controls re-post on every track
@@ -303,6 +320,33 @@ class NotificationListener : NotificationListenerService() {
 
     private fun imageStagingDir(): File = File(filesDir, "notif_images")
 
+    /**
+     * Detect "this is a phone/VoIP call" notification across the
+     * three reliable signals:
+     *   1. Notification.category == CATEGORY_CALL (Android's
+     *      canonical hint — all well-behaved dialer / voip apps set
+     *      this; both incoming + missed-call use it)
+     *   2. Package is a known dialer (handles legacy apps that
+     *      don't set category correctly)
+     *   3. Title / text matches obvious call patterns ("Incoming
+     *      call", "Missed call", "Voice call from", etc.) — catches
+     *      apps that route call notifs through a generic category
+     *
+     * Returns true if ANY of the three signals fire.
+     */
+    private fun looksLikeCallNotification(
+        category: String?,
+        pkg: String,
+        title: String?,
+        text: String?,
+    ): Boolean {
+        if (category == Notification.CATEGORY_CALL) return true
+        if (pkg in DIALER_PACKAGES) return true
+        val combined = "${title.orEmpty()} ${text.orEmpty()}".lowercase()
+        if (combined.isBlank()) return false
+        return CALL_BODY_PATTERNS.any { combined.contains(it) }
+    }
+
     companion object {
         private const val TAG = "Mythara/Notif"
         private const val BUFFER_SIZE = 50
@@ -313,6 +357,45 @@ class NotificationListener : NotificationListenerService() {
 
         /** Long-edge cap. Vision models work fine at this resolution. */
         private const val MAX_NOTIF_IMAGE_SIDE = 1024
+
+        /**
+         * Common dialer / phone apps. Used as a fallback when an app
+         * routes call notifications through a generic category. Add
+         * to this set if a specific call app is leaking past
+         * detection.
+         */
+        private val DIALER_PACKAGES: Set<String> = setOf(
+            "com.android.dialer",
+            "com.google.android.dialer",
+            "com.samsung.android.incallui",
+            "com.samsung.android.dialer",
+            "com.android.phone",
+            "com.android.server.telecom",
+            "com.huawei.contacts",
+            "com.miui.voicecall",
+            "com.oneplus.dialer",
+            "com.oppo.contacts",
+        )
+
+        /**
+         * Substrings checked against `(title + " " + text).lowercase()`
+         * — covers en-US wording across most messengers + the
+         * stock Phone app. Conservative; we'd rather miss a borderline
+         * call notif than misclassify a chat as a call.
+         */
+        private val CALL_BODY_PATTERNS: List<String> = listOf(
+            "incoming call",
+            "missed call",
+            "calling…",
+            "calling...",
+            "ongoing call",
+            "voice call",
+            "video call",
+            "voip call",
+            "answer",
+            "is calling",
+            "called you",
+        )
 
         @Volatile var instance: NotificationListener? = null
             private set

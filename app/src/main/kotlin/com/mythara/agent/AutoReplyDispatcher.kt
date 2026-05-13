@@ -57,6 +57,7 @@ class AutoReplyDispatcher @Inject constructor(
     private val audit: AuditLogger,
     private val imageIngestor: NotificationImageIngestor,
     private val convWriter: ConversationMessageWriter,
+    private val processCallNotifs: com.mythara.data.ProcessCallNotificationsStore,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -95,6 +96,13 @@ class AutoReplyDispatcher @Inject constructor(
         // images on this notif as a defensive cleanup.
         if (r.looksLikeVideo) {
             Log.d(TAG, "skipping video notification from ${r.packageName}")
+            r.imagePaths.forEach { runCatching { java.io.File(it).delete() } }
+            return
+        }
+        // Call notifications: skip by default. User can opt in via
+        // Settings → "process call notifications".
+        if (r.looksLikeCall && !processCallNotifs.isEnabled()) {
+            Log.d(TAG, "skipping call notification from ${r.packageName} (toggle off)")
             r.imagePaths.forEach { runCatching { java.io.File(it).delete() } }
             return
         }

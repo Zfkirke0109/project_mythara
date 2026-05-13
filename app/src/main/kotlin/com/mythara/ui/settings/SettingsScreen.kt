@@ -99,6 +99,9 @@ fun SettingsScreen(
         AutoTriagePanel()
 
         Spacer(Modifier.height(16.dp))
+        ProcessCallNotificationsPanel()
+
+        Spacer(Modifier.height(16.dp))
         AutoReplyPrefixPanel()
 
         Spacer(Modifier.height(16.dp))
