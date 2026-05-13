@@ -13,6 +13,7 @@ import com.mythara.secret.observe.ObserveSession
 import com.mythara.secret.observe.ObserveState
 import com.mythara.secret.observe.ObserveStore
 import com.mythara.secret.observe.embed.EmbeddingsModelStore
+import com.mythara.secret.observe.vosk.SpeakerModelStore
 import com.mythara.secret.observe.extract.gemma.GemmaExtractor
 import com.mythara.secret.observe.extract.gemma.GemmaModelStore
 import com.mythara.secret.observe.extract.gemma.HuggingFaceTokenStore
@@ -41,6 +42,7 @@ class SecretSettingsViewModel @Inject constructor(
     private val store: ObserveStore,
     private val voskModel: VoskModelStore,
     private val embedModel: EmbeddingsModelStore,
+    private val speakerModel: SpeakerModelStore,
     private val gemmaModel: GemmaModelStore,
     private val gemmaExtractor: GemmaExtractor,
     private val hfToken: HuggingFaceTokenStore,
@@ -58,6 +60,7 @@ class SecretSettingsViewModel @Inject constructor(
         val confirmingForget: Boolean = false,
         val modelState: VoskModelStore.State = VoskModelStore.State.Missing,
         val embedModelState: EmbeddingsModelStore.State = EmbeddingsModelStore.State.Missing,
+        val speakerModelState: SpeakerModelStore.State = SpeakerModelStore.State.Missing,
         val gemmaModelState: GemmaModelStore.State = GemmaModelStore.State.Missing,
         /** True when a HuggingFace access token has been saved (its value
          *  itself is never exposed to the UI). */
@@ -106,6 +109,11 @@ class SecretSettingsViewModel @Inject constructor(
         viewModelScope.launch {
             embedModel.state.collect { ems ->
                 _state.update { it.copy(embedModelState = ems) }
+            }
+        }
+        viewModelScope.launch {
+            speakerModel.state.collect { sps ->
+                _state.update { it.copy(speakerModelState = sps) }
             }
         }
         viewModelScope.launch {
@@ -183,6 +191,14 @@ class SecretSettingsViewModel @Inject constructor(
 
     fun forgetLanguage(lang: Language) {
         viewModelScope.launch { voskModel.forgetLanguage(lang) }
+    }
+
+    fun ensureSpeakerModel() {
+        viewModelScope.launch { speakerModel.ensureReady() }
+    }
+
+    fun forgetSpeakerModel() {
+        speakerModel.forget()
     }
 
     fun ensureEmbedModel() {

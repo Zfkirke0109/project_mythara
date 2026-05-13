@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.mythara.secret.observe.ObserveState
 import com.mythara.secret.observe.embed.EmbeddingsModelStore
+import com.mythara.secret.observe.vosk.SpeakerModelStore
 import com.mythara.secret.observe.extract.gemma.GemmaModelStore
 import com.mythara.secret.observe.vosk.VoskModelStore
 import com.mythara.ui.theme.Glyph
@@ -357,6 +358,77 @@ fun SecretSettingsScreen(
             Spacer(Modifier.height(6.dp))
             Text(
                 text = "${Glyph.AccentBar} each captured transcript is embedded locally to a 100-dim vector. semantic retrieval (M8.3+) is built on these. inference runs entirely on-device.",
+                color = MytharaColors.FgDim,
+                style = MaterialTheme.typography.bodySmall.copy(letterSpacing = 1.sp),
+            )
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        Panel("speaker model (Vosk x-vector, ~13MB)") {
+            when (val ss = state.speakerModelState) {
+                is SpeakerModelStore.State.Ready -> {
+                    Text(
+                        text = "${Glyph.Check} speaker model ready",
+                        color = MytharaColors.Julep,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Button(
+                        onClick = { vm.forgetSpeakerModel() },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MytharaColors.Surface, contentColor = MytharaColors.Fg,
+                        ),
+                    ) { Text("${Glyph.Cross} clear cache") }
+                }
+                is SpeakerModelStore.State.Missing -> {
+                    Text(
+                        text = "${Glyph.Cross} not downloaded — speaker tagging stays off until this lands.",
+                        color = MytharaColors.Mustard, style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { vm.ensureSpeakerModel() },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MytharaColors.Charple, contentColor = MytharaColors.Fg,
+                        ),
+                    ) { Text("${Glyph.Arrow} download speaker model (13MB)") }
+                }
+                is SpeakerModelStore.State.Downloading -> Text(
+                    text = if (ss.total > 0) "${Glyph.Ellipsis} downloading ${ss.pct}% (${ss.bytes / 1_000_000}MB / ${ss.total / 1_000_000}MB)"
+                    else "${Glyph.Ellipsis} downloading ${ss.bytes / 1_000_000}MB",
+                    color = MytharaColors.Citron, style = MaterialTheme.typography.bodyMedium,
+                )
+                is SpeakerModelStore.State.Extracting -> Text(
+                    text = "${Glyph.Ellipsis} extracting…",
+                    color = MytharaColors.Citron, style = MaterialTheme.typography.bodyMedium,
+                )
+                is SpeakerModelStore.State.Failed -> {
+                    Text(
+                        text = "${Glyph.Cross} failed: ${ss.message}",
+                        color = MytharaColors.Sriracha,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { vm.ensureSpeakerModel() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MytharaColors.Charple, contentColor = MytharaColors.Fg,
+                            ),
+                        ) { Text("${Glyph.Refresh} retry") }
+                        Button(
+                            onClick = { vm.forgetSpeakerModel() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MytharaColors.Surface, contentColor = MytharaColors.Fg,
+                            ),
+                        ) { Text("${Glyph.Cross} clear cache") }
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "${Glyph.AccentBar} once downloaded, every Observe utterance also gets a 128-dim speaker vector. M8.4 part 2 will let you enrol named speakers and tag transcripts with `speaker:<name>` facets.",
                 color = MytharaColors.FgDim,
                 style = MaterialTheme.typography.bodySmall.copy(letterSpacing = 1.sp),
             )
