@@ -2,30 +2,45 @@
 """
 Render the Mythara splash mark as a phone wallpaper PNG.
 
-Background: vertical purple-black gradient — near-pure black with a
-violet undertone at the top (#06040C) deepening into Mythara purple
-toward the bottom (#2A1740). Reads "deep space" rather than flat
-grey, while staying dark enough that lockscreen text + the petal
-colors pop.
+Layered composition (bottom → top):
 
-Foreground: the same 10-petal geometric rose used by splash_icon.xml —
-5 large purple petals (#6B50FF) at 0/72/144/216/288 deg, 5 smaller
-lavender petals (#9B86FF) interleaved at 36/108/180/252/324 deg, and
-a cyan hexagon (#68FFD6) at the center.
+  1. Vertical purple-black gradient — near-pure black with a violet
+     undertone at the top (#06040C) deepening into Mythara purple
+     toward the bottom (#2A1740). Reads "deep space" rather than
+     flat grey, while staying dark enough that lockscreen text +
+     the petal colors pop.
 
-Wordmark: "MYTHARA" (JetBrains Mono Bold, lavender, letter-spaced)
-sits just below the rose, with a smaller "1.0" (JetBrains Mono
-Regular, cyan) underneath as the version stamp, and the seven-word
-backronym "Mind-Yoked Tonal-Haptic Adaptive Resonant Assistant"
-beneath that in a muted lavender — one word per MYTHARA letter,
-mapping the brand to what the system actually ships:
-  M ind         the personalized LearningVault
-  Y oked        tied to YOUR state, not generic
-  T onal        Music Mode + Resonance binaural / isochronic
-  H aptic       watch buzz on insights, reminders, sessions
-  A daptive     learns continuously from your data
-  R esonant     Resonance Mode closed-loop biometric regulation
-  A ssistant    the agent that runs commands & talks back
+  2. Light-purple node-graph mesh (optional, on by default) —
+     procedural neural-net constellation. Jittered grid points
+     connected to their nearest neighbors with thin lines. Subtle:
+     low alpha so it sits as a backdrop, not a focal element.
+
+  3. Character silhouette (optional, --character <path>) —
+     background-removed via colour-distance threshold against the
+     image's corner-sampled background, tinted light purple, alpha
+     dialled down so the figure reads as a guardian watermark
+     rather than overpowering the brand mark.
+
+  4. Geometric rose — same 10 petals + cyan hexagon as
+     splash_icon.xml. 5 large purple petals (#6B50FF) at
+     0/72/144/216/288 deg, 5 smaller lavender petals (#9B86FF)
+     interleaved at 36/108/180/252/324 deg, hexagon nucleus
+     (#68FFD6).
+
+  5. Wordmark — "MYTHARA" (JetBrains Mono Bold, lavender, letter-
+     spaced) sits just below the rose, with a smaller "1.0"
+     (JetBrains Mono Regular, cyan) underneath as the version
+     stamp, and the seven-word backronym "Mind-Yoked Tonal-Haptic
+     Adaptive Resonant Assistant" beneath that in a muted lavender
+     — one word per MYTHARA letter, mapping the brand to what the
+     system actually ships:
+       M ind         the personalized LearningVault
+       Y oked        tied to YOUR state, not generic
+       T onal        Music Mode + Resonance binaural / isochronic
+       H aptic       watch buzz on insights, reminders, sessions
+       A daptive     learns continuously from your data
+       R esonant     Resonance Mode closed-loop biometric regulation
+       A ssistant    the agent that runs commands & talks back
 
 Default output resolution: 1280 x 2856 (Pixel 10 Pro physical).
 Override via --width / --height for other devices, --out for a
@@ -36,6 +51,8 @@ Usage:
   python3 tools/branding/render_wallpaper.py
   python3 tools/branding/render_wallpaper.py --out /tmp/wp.png \\
       --width 1080 --height 2424   # Pixel 9 Pro Fold
+  python3 tools/branding/render_wallpaper.py \\
+      --character "~/Downloads/shared image.jpeg" --no-mesh
 
 After rendering, push to a paired device and apply via the
 WallpaperApplyReceiver shipped in :app:
@@ -48,14 +65,16 @@ WallpaperApplyReceiver shipped in :app:
       --es path /sdcard/Pictures/mythara_wallpaper.png \\
       --es target both
 
-Requires: Pillow >= 10.
+Requires: Pillow >= 10, numpy >= 1.20 (for the silhouette / mesh paths).
 """
 import argparse
 import math
+import random
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 
 # ─── Palette (matches splash_icon.xml + the watch face) ──────────────
@@ -65,6 +84,8 @@ PURPLE = (0x6B, 0x50, 0xFF)       # large petals
 LAVENDER = (0x9B, 0x86, 0xFF)     # small petals + wordmark
 CYAN = (0x68, 0xFF, 0xD6)         # hexagon nucleus + version stamp
 SUBTITLE_COLOR = (0x76, 0x68, 0xB8)  # muted lavender for the tagline
+MESH_COLOR = (0xB8, 0xA8, 0xE8)      # light purple for the node graph
+SILHOUETTE_COLOR = (0xB8, 0xA8, 0xE8)  # same light purple — guardian watermark
 
 
 # ─── Repo-anchored asset paths ───────────────────────────────────────
@@ -82,6 +103,29 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/tmp/mythara_wallpaper.png"),
         help="output PNG path (default /tmp/mythara_wallpaper.png)",
+    )
+    p.add_argument(
+        "--character",
+        type=str,
+        default=None,
+        help="optional character image to extract a guardian silhouette from",
+    )
+    p.add_argument(
+        "--silhouette-alpha",
+        type=int,
+        default=70,
+        help="max alpha for the silhouette overlay (0-255, default 70 — watermark)",
+    )
+    p.add_argument(
+        "--no-mesh",
+        action="store_true",
+        help="skip the node-graph mesh background layer",
+    )
+    p.add_argument(
+        "--mesh-seed",
+        type=int,
+        default=42,
+        help="RNG seed for the node-graph mesh layout (default 42 — reproducible)",
     )
     return p.parse_args()
 
@@ -128,6 +172,195 @@ def render_gradient(img: Image.Image) -> None:
         draw.line([(0, y), (w, y)], fill=(r, g, b))
 
 
+def render_node_mesh(img: Image.Image, seed: int = 42) -> None:
+    """
+    Composite a subtle "neural-net constellation" onto the gradient.
+
+    Strategy: lay a regular grid of cells, jitter each cell's centre
+    by up to half a cell so points avoid an obvious lattice look, then
+    connect each point to every other point within MAX_LINK_DIST.
+    Because the grid bounds connection candidates, this stays O(n)
+    even for thousands of nodes — no all-pairs sweep needed.
+
+    Drawn into a separate RGBA layer so the mesh's per-segment alpha
+    can vary without disturbing the gradient pixels (longer links
+    fade out, giving a depth-of-field feel).
+    """
+    rng = random.Random(seed)
+    w, h = img.size
+
+    # Tune density relative to the canvas — ~22 cells across a
+    # 1280-wide canvas gives ~330 nodes total at 2856 tall, dense
+    # enough to read as a network without becoming busy.
+    cells_x = max(8, w // 60)
+    cell_size = w / cells_x
+    cells_y = math.ceil(h / cell_size)
+    max_link_dist = cell_size * 1.6  # diag-ish — a few neighbours per node
+
+    points = []
+    for ix in range(cells_x):
+        for iy in range(cells_y):
+            jitter_x = rng.uniform(-0.5, 0.5) * cell_size
+            jitter_y = rng.uniform(-0.5, 0.5) * cell_size
+            px = (ix + 0.5) * cell_size + jitter_x
+            py = (iy + 0.5) * cell_size + jitter_y
+            points.append((px, py, ix, iy))
+
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+
+    # Bucket lookup by cell so we only check immediate neighbour cells
+    # for link candidates.
+    by_cell = {}
+    for p in points:
+        by_cell.setdefault((p[2], p[3]), []).append(p)
+
+    base_alpha = 70  # 0-255 — central segment opacity at zero distance
+    for x1, y1, ix, iy in points:
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                bucket = by_cell.get((ix + dx, iy + dy), ())
+                for x2, y2, _, _ in bucket:
+                    if (x2, y2) <= (x1, y1):
+                        continue  # dedupe pairs
+                    d = math.hypot(x2 - x1, y2 - y1)
+                    if d > max_link_dist:
+                        continue
+                    # Linear fade from base_alpha at d=0 to 0 at the
+                    # max link distance, so wide-angle links read as
+                    # softer / further away.
+                    a = round(base_alpha * (1 - d / max_link_dist))
+                    if a <= 0:
+                        continue
+                    draw.line(
+                        [(x1, y1), (x2, y2)],
+                        fill=(*MESH_COLOR, a),
+                        width=1,
+                    )
+        # Tiny dot at each node — slightly brighter than the lines.
+        draw.ellipse(
+            [(x1 - 1.5, y1 - 1.5), (x1 + 1.5, y1 + 1.5)],
+            fill=(*MESH_COLOR, 130),
+        )
+
+    img.alpha_composite(layer) if img.mode == "RGBA" else img.paste(
+        layer, (0, 0), layer
+    )
+
+
+def _extract_silhouette_mask(src: Image.Image) -> np.ndarray:
+    """
+    Build a binary foreground mask from a character illustration with a
+    near-uniform background. Strategy: flood-fill the four corners
+    with a sentinel colour using a generous similarity tolerance,
+    then mark every non-sentinel pixel as foreground.
+
+    This catches the entire connected background region (including
+    arbitrarily-shaped concavities around limbs / between feet)
+    without needing per-pixel distance thresholds — which fail when
+    the character's skin / white clothing happens to be similar to
+    the background colour, as is the case here.
+
+    Returns a (H, W) uint8 array — 255 = foreground, 0 = background.
+    """
+    w, h = src.size
+    work = src.convert("RGB").copy()
+    # Pick a sentinel that is extremely unlikely to appear in the
+    # source (RGB channel triple of 1/2/3 is essentially black).
+    sentinel = (1, 2, 3)
+    # Tolerance is "max per-channel distance" — 35 is generous enough
+    # to swallow the JPEG-compression noise in cream backgrounds
+    # without bleeding into pigmented character regions.
+    for cx, cy in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+        ImageDraw.floodfill(work, (cx, cy), sentinel, thresh=35)
+    arr = np.array(work)
+    is_bg = (arr[..., 0] == sentinel[0]) & (arr[..., 1] == sentinel[1]) & (arr[..., 2] == sentinel[2])
+    mask = np.where(is_bg, 0, 255).astype(np.uint8)
+    return mask
+
+
+def render_silhouette(
+    img: Image.Image,
+    source_path: Path,
+    target_y_top: int,
+    max_alpha: int = 70,
+    target_height_frac: float = 0.62,
+) -> None:
+    """
+    Background-remove `source_path`, tint the result light purple, and
+    composite it onto `img` as a guardian watermark.
+
+    Background removal: corner-flood-fill (see _extract_silhouette_mask
+    for rationale). The resulting binary mask is feathered with a
+    small Gaussian blur so the silhouette edge reads like a soft
+    watermark rather than a hard die-cut.
+
+    Position + scale: the figure is scaled so its height equals
+    `target_height_frac * canvas_height`, then centred horizontally
+    and anchored vertically by its TOP at `target_y_top`. The default
+    0.62 is tuned so the warrior dominates the lower 2/3 of the
+    canvas while the rose + wordmark sit cleanly above her.
+    """
+    if not source_path.exists():
+        sys.exit(f"--character image not found: {source_path}")
+    src = Image.open(source_path).convert("RGBA")
+    src_w, src_h = src.size
+
+    mask = _extract_silhouette_mask(src)  # (H, W) uint8 — figure outline
+    arr = np.array(src)                   # (H, W, 4)
+
+    # Per-pixel luminance of the source (Rec. 601 weights — the same
+    # the eye uses), 0..1. We invert it so dark pixels (line work,
+    # shadows, eyes, jewellery edges) stay opaque and pale pixels
+    # (skin, white crop top) fade. This keeps the character's
+    # internal detail readable instead of collapsing the whole
+    # figure into a flat purple blob.
+    rgb = arr[..., :3].astype(np.float32)
+    luma = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+    inv = 1.0 - (luma / 255.0)            # 0=white, 1=black
+
+    # Lift the floor a little so even bright skin still leaves a
+    # ghost of itself — pure 0 alpha there would punch holes in the
+    # otherwise-coherent silhouette. 0.30 floor gives a nice "tinted
+    # tracing paper" feel inside the figure.
+    inv = 0.30 + 0.70 * inv
+
+    # Combine the figure mask (binary, defines where the character
+    # ends) with the luminance modulation (continuous, defines how
+    # opaque each interior pixel is). Multiply both, then scale by
+    # the watermark intensity cap.
+    fig_mask = mask.astype(np.float32) / 255.0
+    alpha = (fig_mask * inv * max_alpha).astype(np.uint8)
+
+    tint = np.zeros((src_h, src_w, 4), dtype=np.uint8)
+    tint[..., 0] = SILHOUETTE_COLOR[0]
+    tint[..., 1] = SILHOUETTE_COLOR[1]
+    tint[..., 2] = SILHOUETTE_COLOR[2]
+    tint[..., 3] = alpha
+    tinted = Image.fromarray(tint, mode="RGBA")
+
+    # Edge feather — a small blur makes the silhouette feel less
+    # pasted-on, especially after we scale it up below.
+    tinted = tinted.filter(ImageFilter.GaussianBlur(radius=1.0))
+
+    # Scale to the requested fraction of the canvas height, then
+    # cap width to 95% of canvas width if the source is wide.
+    canvas_w, canvas_h = img.size
+    target_h = int(canvas_h * target_height_frac)
+    scale = target_h / src_h
+    if src_w * scale > canvas_w * 0.95:
+        scale = (canvas_w * 0.95) / src_w
+    new_w = max(1, int(src_w * scale))
+    new_h = max(1, int(src_h * scale))
+    tinted = tinted.resize((new_w, new_h), Image.LANCZOS)
+
+    paste_x = (canvas_w - new_w) // 2
+    paste_y = target_y_top
+    # Caller is responsible for ensuring `img` is RGBA. main() does
+    # this once after rendering the gradient.
+    img.alpha_composite(tinted, (paste_x, paste_y))
+
+
 def render_rose(draw: ImageDraw.ImageDraw, cx: float, cy: float, scale: float) -> float:
     """Render the 10-petal rose + cyan hexagon centred at (cx,cy).
     Returns the y-coordinate of the rose's bottom-most pixel so the
@@ -165,9 +398,11 @@ def render_rose(draw: ImageDraw.ImageDraw, cx: float, cy: float, scale: float) -
     return cy + 30 * scale
 
 
-def render_wordmark(draw: ImageDraw.ImageDraw, canvas_w: int, rose_bottom_y: float) -> None:
+def render_wordmark(draw: ImageDraw.ImageDraw, canvas_w: int, rose_bottom_y: float) -> int:
     """Lay out MYTHARA + 1.0 + the seven-word backronym subtitle below
-    the rose, all centred horizontally."""
+    the rose, all centred horizontally. Returns the y-coordinate of
+    the bottom-most rendered text pixel so callers can position
+    subsequent layers (e.g. the silhouette) without overlap."""
     if not FONT_BOLD.exists() or not FONT_REG.exists():
         sys.exit(f"missing JetBrains Mono fonts under {FONT_BOLD.parent}")
 
@@ -210,31 +445,110 @@ def render_wordmark(draw: ImageDraw.ImageDraw, canvas_w: int, rose_bottom_y: flo
     s_y = v_y + v_ascent + 32
     draw.text((s_x, s_y), subtitle, font=subtitle_font, fill=SUBTITLE_COLOR)
 
+    # Subtitle baseline + descent ≈ wordmark block bottom.
+    s_ascent, s_descent = subtitle_font.getmetrics()
+    return int(s_y + s_ascent + s_descent)
+
+
+def _wordmark_block_height() -> int:
+    """Total pixel height of the MYTHARA + 1.0 + tagline block, useful
+    for anchoring the wordmark from a known canvas-bottom y instead
+    of from the rose-bottom. Mirrors render_wordmark's vertical
+    layout maths exactly, without drawing anything.
+    """
+    mf = ImageFont.truetype(str(FONT_BOLD), 96)
+    vf = ImageFont.truetype(str(FONT_REG), 40)
+    sf = ImageFont.truetype(str(FONT_REG), 30)
+    m_a, _m_d = mf.getmetrics()
+    v_a, _v_d = vf.getmetrics()
+    s_a, s_d = sf.getmetrics()
+    # mythara_top → version_top: m_a + 24
+    # version_top → subtitle_top: v_a + 32
+    # subtitle_top → subtitle_bottom: s_a + s_d
+    return m_a + 24 + v_a + 32 + s_a + s_d
+
 
 def main() -> None:
     args = parse_args()
     w, h = args.width, args.height
-
-    # Render at scale 8 against a 108-unit source viewport — gives a
-    # ~864 px rose on a 1280 px canvas (~67% of width). Looks like
-    # branding, not a wall of color. Scale follows width so non-Pixel-
-    # 10-Pro outputs stay proportionate.
-    scale = 8 * (w / 1280)
     cx = w / 2
-    # Bias the rose slightly above true vertical centre so the mark
-    # sits in the top third of a portrait phone — clear of the home
-    # dock and (mostly) clear of the lockscreen clock band.
-    cy = h / 2 - 200 * (h / 2856)
 
+    # Two layouts:
+    #   no character → centre-biased rose with the wordmark sitting
+    #                  directly beneath it (the original "splash"
+    #                  composition, lots of breathing room)
+    #   character    → "guardian" composition: rose floats above the
+    #                  warrior's headdress in the upper sixth of the
+    #                  canvas, the silhouette fills the middle band,
+    #                  and the wordmark anchors to the bottom margin.
+    has_silhouette = bool(args.character)
+    if has_silhouette:
+        # Rose lifted near the top so it reads as a halo above the
+        # warrior's headdress. Scaled slightly smaller so it doesn't
+        # crowd the figure.
+        scale = 6.5 * (w / 1280)
+        cy = h * 0.16
+    else:
+        # Original splash layout.
+        scale = 8 * (w / 1280)
+        cy = h / 2 - 200 * (h / 2856)
+
+    # Z-order:
+    #   1. gradient (RGB, base)
+    #   2. node-graph mesh   (subtle backdrop)
+    #   3. character silhouette (large guardian watermark)
+    #   4. rose                  (above her headdress)
+    #   5. wordmark + version + tagline (anchored to bottom)
+    # Steps 2+ all alpha-composite, so promote to RGBA after the
+    # gradient is laid down.
     img = Image.new("RGB", (w, h), BG_TOP)
     render_gradient(img)
+    img = img.convert("RGBA")
 
-    draw = ImageDraw.Draw(img)
-    rose_bottom_y = render_rose(draw, cx, cy, scale)
-    render_wordmark(draw, w, rose_bottom_y)
+    if not args.no_mesh:
+        render_node_mesh(img, seed=args.mesh_seed)
+
+    if has_silhouette:
+        # Wordmark block pinned to the bottom of the canvas with a
+        # small bottom margin. Compute its top-y so we know how much
+        # vertical space the silhouette can claim.
+        bottom_margin = int(h * 0.05)
+        wm_block_h = _wordmark_block_height()
+        wordmark_top_y = h - bottom_margin - wm_block_h
+        # mythara_y is the *top* of the MYTHARA glyph block; the
+        # render_wordmark helper expects rose_bottom_y + 70 to land
+        # there, so derive the synthetic rose_bottom we'll feed it.
+        synthetic_rose_bottom = wordmark_top_y - 70
+
+        # Silhouette spans rose-bottom → wordmark-top with margins.
+        rose_bottom_y = cy + 30 * scale
+        silhouette_top = int(rose_bottom_y + 30)
+        silhouette_avail_h = wordmark_top_y - silhouette_top - 30
+        silhouette_frac = max(0.0, silhouette_avail_h / h)
+        render_silhouette(
+            img,
+            Path(args.character).expanduser(),
+            target_y_top=silhouette_top,
+            max_alpha=args.silhouette_alpha,
+            target_height_frac=silhouette_frac,
+        )
+
+        draw = ImageDraw.Draw(img)
+        render_rose(draw, cx, cy, scale)
+        render_wordmark(draw, w, synthetic_rose_bottom)
+    else:
+        # Original splash layout — wordmark hangs directly off the
+        # rose's bottom edge, no silhouette.
+        rose_bottom_y = cy + 30 * scale
+        draw = ImageDraw.Draw(img)
+        render_rose(draw, cx, cy, scale)
+        render_wordmark(draw, w, rose_bottom_y)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    img.save(args.out, "PNG", optimize=True)
+    # Flatten to RGB for the wallpaper applier — Android's
+    # WallpaperManager doesn't need the alpha channel and a flat RGB
+    # PNG is smaller / loads faster.
+    img.convert("RGB").save(args.out, "PNG", optimize=True)
     print(f"wrote {args.out} ({w}x{h})")
 
 
