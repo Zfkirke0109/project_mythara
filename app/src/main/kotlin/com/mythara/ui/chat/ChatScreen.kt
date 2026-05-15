@@ -624,7 +624,14 @@ private fun Transcript(
                 is ChatViewModel.ChatItem.AssistantText -> TextBubble(
                     text = item.text,
                     kind = item.kind,
-                    musicMode = musicMode && item.kind == ChatViewModel.TextKind.Reply,
+                    // Music Mode applies to ALL agent text kinds —
+                    // Reply (regular agent answer) and Update (agent's
+                    // reaction to a notification). Both flow through
+                    // the same Turn.Finished tone playback, so both
+                    // need the same colour+replay UX.
+                    musicMode = musicMode &&
+                        (item.kind == ChatViewModel.TextKind.Reply ||
+                            item.kind == ChatViewModel.TextKind.Update),
                     onReplayMusic = { onReplayMusic(item.text) },
                     onReinforce = { gotIt -> onReinforce(item.text, gotIt) },
                 )
@@ -702,12 +709,17 @@ private fun TextBubble(
         text
     }
 
-    // Music Mode chrome — when on for a Reply, the bubble shows the
-    // coloured/glowing text (when ready) AND a persistent ▶ replay
-    // chip (always, even before the colour-encode finishes — the
-    // chip should never disappear on the user just because the
-    // suspending encode is briefly behind a recomposition).
-    val isMusicReply = musicMode && kind == ChatViewModel.TextKind.Reply
+    // Music Mode chrome — when on for any agent message kind (Reply
+    // OR Update — both go through the same Turn.Finished handler
+    // that auto-plays tones, so both need the matching visual
+    // affordances). The bubble shows the coloured/glowing text (when
+    // ready) AND a persistent ▶ replay chip (always, even before the
+    // colour-encode finishes — the chip should never disappear on
+    // the user just because the suspending encode is briefly behind
+    // a recomposition).
+    val isAgentBubble = kind == ChatViewModel.TextKind.Reply ||
+        kind == ChatViewModel.TextKind.Update
+    val isMusicReply = musicMode && isAgentBubble
     val composedAnnotated = if (isMusicReply) {
         produceMusicAnnotated(displayText, bodyColor)
     } else {
