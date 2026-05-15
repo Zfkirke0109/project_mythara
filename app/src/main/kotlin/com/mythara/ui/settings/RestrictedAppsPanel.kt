@@ -29,6 +29,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
+import androidx.compose.foundation.clickable
 import androidx.lifecycle.viewModelScope
 import com.mythara.data.RestrictedAppsStore
 import com.mythara.ui.theme.Glyph
@@ -43,6 +44,7 @@ import javax.inject.Inject
 @HiltViewModel
 class RestrictedAppsViewModel @Inject constructor(
     private val store: RestrictedAppsStore,
+    private val fullControl: com.mythara.data.FullControlStore,
 ) : ViewModel() {
     val blocked: StateFlow<Set<String>> =
         store.blockedFlow().stateIn(viewModelScope, SharingStarted.Eagerly, RestrictedAppsStore.BLOCKED_DEFAULTS)
@@ -56,10 +58,14 @@ class RestrictedAppsViewModel @Inject constructor(
     val criticalExtras: StateFlow<Set<String>> =
         store.criticalExtrasFlow().stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
+    val fullControlEnabled: StateFlow<Boolean> =
+        fullControl.enabledFlow().stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     fun addBlocked(pkg: String) { viewModelScope.launch { store.addBlocked(pkg) } }
     fun removeBlocked(pkg: String) { viewModelScope.launch { store.removeBlocked(pkg) } }
     fun addCritical(pkg: String) { viewModelScope.launch { store.addCritical(pkg) } }
     fun removeCritical(pkg: String) { viewModelScope.launch { store.removeCritical(pkg) } }
+    fun setFullControl(value: Boolean) { viewModelScope.launch { fullControl.setEnabled(value) } }
 }
 
 /**
@@ -76,6 +82,7 @@ fun RestrictedAppsPanel(vm: RestrictedAppsViewModel = hiltViewModel()) {
     val critical by vm.critical.collectAsState()
     val blockedExtras by vm.blockedExtras.collectAsState()
     val criticalExtras by vm.criticalExtras.collectAsState()
+    val fullControl by vm.fullControlEnabled.collectAsState()
 
     Column(
         modifier = Modifier
@@ -95,6 +102,18 @@ fun RestrictedAppsPanel(vm: RestrictedAppsViewModel = hiltViewModel()) {
                 "Blocked apps (banking, payment, wallet, brokerage) are NEVER automated — open them yourself. " +
                 "Critical apps (rides, delivery, orders, travel) ALWAYS pop a confirmation before Mythara taps anything, no matter the autopilot state.",
             style = MaterialTheme.typography.bodySmall.copy(color = MytharaColors.FgDim),
+        )
+
+        Spacer(Modifier.height(14.dp))
+
+        // Full Control — top-level "no friction" override that
+        // bypasses BOTH the blocked-list veto AND the critical-list
+        // confirmation popup. Off by default; user-explicit opt-in
+        // only. Lives at the top of the panel because it's the
+        // override above everything else below it on the page.
+        FullControlToggle(
+            enabled = fullControl,
+            onToggle = { vm.setFullControl(!fullControl) },
         )
 
         Spacer(Modifier.height(12.dp))
@@ -250,5 +269,43 @@ private fun Section(
                 Text("${Glyph.Arrow} add")
             }
         }
+    }
+}
+
+/** Top-level "Full Control" toggle row. Pulled out of the panel
+ *  body so the panel reads as: explainer → override → blocked list
+ *  → critical list, top-to-bottom. Visual treatment matches an
+ *  in-line warning when on (Sriracha border + tag) so the user is
+ *  always aware the policies are bypassed. */
+@Composable
+private fun FullControlToggle(enabled: Boolean, onToggle: () -> Unit) {
+    val accent = if (enabled) MytharaColors.Sriracha else MytharaColors.SurfaceHigh
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, accent, RoundedCornerShape(8.dp))
+            .clickable { onToggle() }
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Text(
+                text = if (enabled) "${Glyph.CircleFilled} full control · ON" else "${Glyph.CircleOutline} full control · off",
+                color = if (enabled) MytharaColors.Sriracha else MytharaColors.Fg,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = if (enabled) {
+                "Mythara fires every side-effect tool with no confirmation, including in apps you've added to the blocked or critical lists. You are the only gatekeeper."
+            } else {
+                "Override the blocked + critical lists. Tap to flip on — every confirmation popup disappears and the agent acts immediately, even in banking / shopping apps."
+            },
+            style = MaterialTheme.typography.bodySmall.copy(
+                color = if (enabled) MytharaColors.Sriracha else MytharaColors.FgDim,
+            ),
+        )
     }
 }

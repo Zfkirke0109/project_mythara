@@ -44,6 +44,11 @@ import javax.inject.Singleton
 @Singleton
 class CriticalActionGuard @Inject constructor(
     private val restricted: RestrictedAppsStore,
+    /** When the user has flipped Full Control on, every Decision
+     *  short-circuits to [Decision.Allow] — see [evaluate]. Read
+     *  cheaply per-call: DataStore caches in memory after first
+     *  hydration so the suspending lookup is effectively free. */
+    private val fullControl: com.mythara.data.FullControlStore,
 ) {
     sealed interface Decision {
         data object Allow : Decision
@@ -66,6 +71,16 @@ class CriticalActionGuard @Inject constructor(
     suspend fun evaluate(toolName: String, args: JsonObject): Decision {
         // Read tools never trip the guard.
         if (toolName in READ_TOOLS) return Decision.Allow
+
+        // Full Control override — when on, the user has explicitly
+        // chosen "no friction, I'm the gatekeeper" and we skip the
+        // entire block / critical policy. Logged so a misbehaving
+        // tool call inside a banking app still leaves a trail in
+        // logcat for postmortem.
+        if (fullControl.isEnabled()) {
+            Log.d(TAG, "FULL_CONTROL allow $toolName (policy bypassed)")
+            return Decision.Allow
+        }
 
         // Compute the target package depending on which tool this is.
         val targetPkg = when (toolName) {
