@@ -150,14 +150,28 @@ class MusicToneEngine @Inject constructor() {
 
         // Layer the fundamental with its first three harmonics —
         // amplitude decays as 1/n so the spectrum matches a vocal /
-        // organ-pipe stack rather than a pure sine. This is what gives
-        // OM its deep, "ahhhmmm" body instead of the thin tone you'd
-        // get from a single sine. Harmonics above NYQUIST_GUARD are
-        // dropped so high motif notes don't alias.
-        val harmonicGains = floatArrayOf(1.0f, 0.55f, 0.33f, 0.22f)
-        val activeOmegas = ArrayList<Double>(harmonicGains.size)
-        val activeGains = ArrayList<Float>(harmonicGains.size)
+        // organ-pipe stack rather than a pure sine. PLUS a constant
+        // 136.1 Hz "OM drone" sub-layer present in every note: that's
+        // the actual Sanskrit OM frequency, and having it always
+        // resonating underneath gives every motif the deep
+        // tanpura-style body the user's ear is reaching for. Without
+        // the drone, motifs that don't happen to use 136.1 Hz as one
+        // of their notes lose all the OM character.
+        //
+        // Harmonics above NYQUIST_GUARD are dropped so high motif
+        // notes don't alias. The OM drone is ALWAYS added even when
+        // freqHz IS 136.1 — the doubled fundamental just sounds a
+        // little fuller, no aliasing risk.
+        val harmonicGains = floatArrayOf(1.0f, 0.45f, 0.25f, 0.16f)
+        val activeOmegas = ArrayList<Double>(harmonicGains.size + 1)
+        val activeGains = ArrayList<Float>(harmonicGains.size + 1)
         var gainSum = 0f
+
+        // OM drone first.
+        activeOmegas.add(2.0 * PI * OM_DRONE_HZ / sampleRate.toDouble())
+        activeGains.add(OM_DRONE_GAIN)
+        gainSum += OM_DRONE_GAIN
+
         for ((idx, g) in harmonicGains.withIndex()) {
             val hz = freqHz * (idx + 1)
             if (hz > NYQUIST_GUARD_HZ) break
@@ -270,6 +284,20 @@ class MusicToneEngine @Inject constructor() {
          *  a sustained chant. */
         private const val TREMOLO_RATE_HZ = 5.0
         private const val TREMOLO_DEPTH = 0.14
+
+        /** Constant OM-fundamental drone layered under every note —
+         *  the Sanskrit OM frequency (136.1 Hz, Cousto). Always
+         *  present in the spectrum so every motif carries the deep
+         *  resonant body, regardless of what pitch the motif
+         *  itself selected from OM_HARMONICS. */
+        private const val OM_DRONE_HZ = 136.1f
+
+        /** Drone gain — loud enough to feel underneath every note,
+         *  quiet enough that the motif's variable top notes still
+         *  carry the "which word is this" information. ~½ of the
+         *  fundamental gain hits the right balance in casual phone
+         *  listening. */
+        private const val OM_DRONE_GAIN = 0.55f
 
         /** Cap on the highest harmonic frequency we synthesise — drop
          *  any overtone above this so high motif notes don't alias

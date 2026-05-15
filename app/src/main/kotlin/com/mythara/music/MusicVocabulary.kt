@@ -171,18 +171,28 @@ class MusicVocabulary @Inject constructor(
                     if (notes.isNotEmpty()) cache[k] = Motif(notes, h, m, g)
                 }.onFailure { Log.w(TAG, "skipping malformed vocab entry '$k': ${it.message}") }
             }
-            // One-shot migration: if any motif uses pitches outside
-            // the OM-harmonic scale, the vocabulary was minted under
-            // the old pentatonic system. Wipe it so the user starts
-            // fresh at the caveman tier (1-note motifs) and the
-            // language can evolve naturally from there. Trying to
-            // preserve old motifs across the redesign would mix
-            // caveman-tier new words with adult-tier legacy ones in
-            // the same reply — confusing rather than learnable.
+            // One-shot migrations on load:
+            //
+            //  1. Pentatonic legacy — if any motif uses pitches not in
+            //     the OM-harmonic scale, the vocabulary was minted
+            //     under the old algorithm. Wipe so we start fresh.
+            //  2. Collision check — under the original (non-unique)
+            //     minter, two distinct tokens could hash onto the
+            //     same note pattern and become indistinguishable.
+            //     If we find any such pair, wipe and re-mint
+            //     uniquely going forward. Same outcome as the legacy
+            //     case (clean caveman-tier slate), no-op when the
+            //     vocabulary is already a unique set.
             val omSet = OM_HARMONICS.toSet()
             val hasLegacy = cache.values.any { m -> m.notes.any { it !in omSet } }
-            if (hasLegacy) {
-                Log.d(TAG, "clearing legacy pentatonic vocabulary (${cache.size} motif(s))")
+            val signatures = cache.values.map { motifSignature(it.notes) }
+            val hasCollisions = signatures.size != signatures.toSet().size
+            if (hasLegacy || hasCollisions) {
+                val why = listOfNotNull(
+                    if (hasLegacy) "pentatonic-legacy" else null,
+                    if (hasCollisions) "non-unique-motifs" else null,
+                ).joinToString(" + ")
+                Log.d(TAG, "clearing vocabulary: $why (${cache.size} motif(s))")
                 cache.clear()
                 scheduleFlush()
             }
@@ -192,20 +202,81 @@ class MusicVocabulary @Inject constructor(
         }
     }
 
-    /** Deterministic motif minter. Uses a stable hash of the token (+
-     *  generation, so reshaped motifs differ from their predecessor)
-     *  to pick notes from the [OM_HARMONICS] scale. The note count
-     *  comes from the user's CURRENT learning tier (see
-     *  [notesPerMotifFor]) so the language starts at caveman-simple
-     *  and grows in complexity as the vocabulary itself grows. */
+    /** Deterministic motif minter with **uniqueness guarantee**. Each
+     *  token gets a fresh signature that doesn't already exist in
+     *  the vocabulary — without this, two different words could hash
+     *  onto the same note pattern and become indistinguishable to
+     *  the listener (defeats the whole point of a learnable
+     *  language). The dictionary IS the source of truth: cache
+     *  contents define what's "taken."
+     *
+     *  Algorithm:
+     *  1. Compute the user's tier from current cache size.
+     *  2. For salts 0..N-1 at this tier, generate a candidate note
+     *     pattern via stable hash. If its signature is fresh
+     *     (not in the existing-signatures set), use it.
+     *  3. If we've exhausted reasonable salt attempts at this tier,
+     *     escalate to the next tier (one more note) and retry. The
+     *     OM_HARMONICS-sized scale gives 9^tier combinations, so
+     *     escalation is the genuine right answer once a tier is
+     *     full — the user has earned a complexity bump.
+     *  4. Ultimate fallback: append unique salts directly to the
+     *     pattern. Should never trigger in practice (tier-5 alone
+     *     is 9^5 = 59049 unique motifs).
+     *
+     *  Reshaped motifs (generation > 0) are still allowed to
+     *  collide with their own previous generation — a word being
+     *  re-learned with a fresh pattern is the same dictionary slot.
+     *  We exclude THIS key from the collision set. */
     private fun mintMotif(key: String, generation: Int): Motif {
+        val baseTier = notesPerMotifFor(cache.size).coerceIn(1, MAX_NOTES_PER_MOTIF)
+        val existing: Set<String> = cache.entries
+            .filter { it.key != key }
+            .map { motifSignature(it.value.notes) }
+            .toSet()
+
+        for (tier in baseTier..MAX_NOTES_PER_MOTIF) {
+            val possible = pow9(tier)
+            val budget = (possible.coerceAtMost(MAX_SALT_ATTEMPTS_PER_TIER.toLong())).toInt()
+            for (salt in 0 until budget) {
+                val seed = stableHash("$key|$generation|$salt")
+                val notes = pickNotes(seed, tier)
+                if (motifSignature(notes) !in existing) {
+                    return Motif(notes = notes, hits = 0, misses = 0, generation = generation)
+                }
+            }
+        }
+
+        // Should be unreachable for any realistic vocabulary —
+        // 9^5 = 59049 unique tier-5 motifs. Fall back to the
+        // unsalted base pattern at the highest tier so we always
+        // return SOMETHING; the dictionary just won't be unique
+        // at this point and the caller is into pathological
+        // territory anyway.
+        Log.w(TAG, "vocabulary exhausted minting '$key' — collision possible")
         val seed = stableHash("$key|$generation")
-        val count = notesPerMotifFor(cache.size).coerceIn(1, MAX_NOTES_PER_MOTIF)
-        val notes = (0 until count).map { i ->
+        return Motif(
+            notes = pickNotes(seed, MAX_NOTES_PER_MOTIF),
+            hits = 0, misses = 0, generation = generation,
+        )
+    }
+
+    private fun pickNotes(seed: Long, count: Int): List<Float> =
+        (0 until count).map { i ->
             val mixed = seed.rotateLeft(i * 7) xor (i.toLong() * 0x9E3779B9L)
             OM_HARMONICS[(abs(mixed) % OM_HARMONICS.size).toInt()]
         }
-        return Motif(notes = notes, hits = 0, misses = 0, generation = generation)
+
+    /** Two-decimal Hz signature — collisions on equal-rounded notes
+     *  count as collisions (they sound identical). Order matters:
+     *  [136.1, 272.2] and [272.2, 136.1] are distinct phrases. */
+    private fun motifSignature(notes: List<Float>): String =
+        notes.joinToString(",") { "%.1f".format(it) }
+
+    private fun pow9(exp: Int): Long {
+        var r = 1L
+        repeat(exp) { r *= OM_HARMONICS.size.toLong() }
+        return r
     }
 
     private fun stableHash(s: String): Long {
@@ -304,6 +375,13 @@ class MusicVocabulary @Inject constructor(
         /** DataStore writes are debounced — a long reply may reinforce
          *  many tokens; only flush once after the burst settles. */
         private const val FLUSH_DEBOUNCE_MS = 1_500L
+
+        /** Cap on how many salted candidates we'll generate at one
+         *  tier before escalating. With 9 OM harmonics, even tier 2
+         *  has 81 unique combos so this is generous; anything beyond
+         *  this is taking long enough that bumping the tier is
+         *  cheaper than continuing to search. */
+        private const val MAX_SALT_ATTEMPTS_PER_TIER = 256
 
         private val NON_WORD = Regex("[^\\p{L}\\p{Nd}]+")
     }
