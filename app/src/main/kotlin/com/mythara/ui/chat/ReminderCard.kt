@@ -153,8 +153,15 @@ fun ReminderCard(item: ChatViewModel.ChatItem.ReminderCard) {
         }
         Spacer(Modifier.height(10.dp))
         var missedDialogOpen by remember { mutableStateOf(false) }
+        var doneDialogOpen by remember { mutableStateOf(false) }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            ActionChip("${Glyph.Check} done", MytharaColors.Julep) { fireAction(ctx, item.id, "done") }
+            // "Done" chip: tap for immediate done OR opens the
+            // positive-feedback picker so the user can capture
+            // WHY it went well (built a habit, felt energised,
+            // etc.). The picker has a "skip" button so a tap →
+            // tap → done flow is just one extra tap from the old
+            // single-chip flow.
+            ActionChip("${Glyph.Check} done", MytharaColors.Julep) { doneDialogOpen = true }
             ActionChip("+15m", MytharaColors.Mustard) { fireAction(ctx, item.id, "snooze_15m") }
             ActionChip("+1h", MytharaColors.Mustard) { fireAction(ctx, item.id, "snooze_1h") }
             ActionChip("+3h", MytharaColors.Mustard) { fireAction(ctx, item.id, "snooze_3h") }
@@ -170,6 +177,21 @@ fun ReminderCard(item: ChatViewModel.ChatItem.ReminderCard) {
                 onDismiss = { missedDialogOpen = false },
                 onPick = { actionKind ->
                     missedDialogOpen = false
+                    fireAction(ctx, item.id, actionKind)
+                },
+            )
+        }
+        if (doneDialogOpen) {
+            DoneReasonDialog(
+                onDismiss = {
+                    doneDialogOpen = false
+                    // Bare "done" — no reason — still write the
+                    // behaviour event via the receiver so positive
+                    // completions show up in the summary.
+                    fireAction(ctx, item.id, "done")
+                },
+                onPick = { actionKind ->
+                    doneDialogOpen = false
                     fireAction(ctx, item.id, actionKind)
                 },
             )
@@ -250,6 +272,50 @@ private fun MissedReasonDialog(
         confirmButton = {
             TextButton(onClick = onDismiss) {
                 Text("cancel", color = MytharaColors.FgMute)
+            }
+        },
+    )
+}
+
+/**
+ * Positive-side feedback picker shown when the user taps "done"
+ * on a reminder. Mirrors [MissedReasonDialog] but with the
+ * positive-outcome taxonomy. "skip" still marks the task done
+ * (with no reason) so users can clear the card with one tap when
+ * they don't feel like reflecting.
+ *
+ * Captures: WentWell / BuiltHabit / FeltEnergized / EasierThanExpected
+ * / Realised. The daily-review agent uses these to reinforce
+ * successful patterns ("you complete workouts on days when you got
+ * >7h sleep" → suggest protecting sleep on workout days).
+ */
+@Composable
+private fun DoneReasonDialog(
+    onDismiss: () -> Unit,
+    onPick: (actionKind: String) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Nice — how did it go?", color = MytharaColors.Fg) },
+        text = {
+            Column {
+                Text(
+                    text = "Optional. Mythara learns from your wins too — when " +
+                        "things go well it reinforces the patterns that worked.",
+                    color = MytharaColors.FgDim,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(12.dp))
+                ReasonRow("It went well", MytharaColors.Bok) { onPick("done_went_well") }
+                ReasonRow("I'm building a habit", MytharaColors.Bok) { onPick("done_built_habit") }
+                ReasonRow("I felt energised after", MytharaColors.Mustard) { onPick("done_felt_energized") }
+                ReasonRow("It was easier than expected", MytharaColors.Charple) { onPick("done_easier") }
+                ReasonRow("Made me realise…", MytharaColors.Malibu) { onPick("done_realised") }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("skip", color = MytharaColors.Julep)
             }
         },
     )

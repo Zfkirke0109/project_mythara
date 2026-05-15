@@ -66,6 +66,20 @@ class BehaviorEventStore @Inject constructor(
         Other("other", "Other (free text)"),
     }
 
+    /** Reason taxonomy for "done" reminder cards — the POSITIVE
+     *  side of the learning loop. Mythara was missing positive
+     *  signal: it knew what failed but not what worked. The
+     *  daily-review agent uses these to reinforce successful
+     *  patterns ("you finished workouts on days when you got
+     *  >7h sleep" → suggest protecting sleep on workout days). */
+    enum class ReminderDoneReason(val tag: String, val label: String) {
+        WentWell("went-well", "It went well"),
+        BuiltHabit("built-habit", "I'm building a habit"),
+        FeltEnergized("felt-energized", "I felt energized after"),
+        EasierThanExpected("easier-than-expected", "It was easier than expected"),
+        Realised("realised", "Made me realise…"),
+    }
+
     /** User marked a reminder "missed" + picked a reason. The
      *  caller passes the optional free-text note (only set when
      *  reason == Other, but accepted on any reason in case the
@@ -98,6 +112,47 @@ class BehaviorEventStore @Inject constructor(
                 "reason:${reason.tag}",
                 "task:$taskId",
             ),
+            conf = 1.0,
+        )
+    }
+
+    /** User marked a reminder "done" + (optionally) picked a
+     *  reason. Mirrors [recordReminderMiss] for the positive
+     *  side of the learning loop — same vault facet shape so the
+     *  daily-review agent's queries can compare miss / done
+     *  patterns directly. */
+    suspend fun recordReminderDone(
+        taskId: String,
+        reason: ReminderDoneReason?,
+        note: String? = null,
+    ): Boolean {
+        val payload = buildString {
+            append("{\"taskId\":\"")
+            append(jsonEscape(taskId))
+            append("\"")
+            if (reason != null) {
+                append(",\"reason\":\"")
+                append(reason.tag)
+                append("\"")
+            }
+            if (!note.isNullOrBlank()) {
+                append(",\"note\":\"")
+                append(jsonEscape(note.trim()))
+                append("\"")
+            }
+            append("}")
+        }
+        val facets = mutableListOf(
+            FACET_KIND,
+            "behavior:reminder-done",
+            "task:$taskId",
+        )
+        if (reason != null) facets.add("reason:${reason.tag}")
+        return vault.add(
+            content = payload,
+            tier = Tier.Working,
+            src = "behavior:reminder-done",
+            facets = facets,
             conf = 1.0,
         )
     }

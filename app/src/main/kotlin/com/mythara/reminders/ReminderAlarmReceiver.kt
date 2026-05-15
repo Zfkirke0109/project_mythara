@@ -106,7 +106,8 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
         val now = System.currentTimeMillis()
         val task = taskRepo.dao.byId(taskId) ?: return
         when (kind) {
-            "done" -> {
+            "done", "done_went_well", "done_built_habit", "done_felt_energized",
+            "done_easier", "done_realised" -> {
                 if (Recurrence.parse(task.recurrence) != null) {
                     // Recurring — "Done" just dismisses THIS occurrence's
                     // notification. handleFire already re-armed the row
@@ -118,6 +119,20 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                     cancelNotif(ctx, taskId)
                     Log.d(TAG, "$taskId marked done by user")
                 }
+                // Positive-side learning. Tap on the bare "done"
+                // chip writes a behaviour-event row with no reason
+                // (just confirms the completion); tapping a reason
+                // chip writes the reason facet so the daily-review
+                // agent can reinforce the pattern.
+                val reason = when (kind) {
+                    "done_went_well" -> com.mythara.behavior.BehaviorEventStore.ReminderDoneReason.WentWell
+                    "done_built_habit" -> com.mythara.behavior.BehaviorEventStore.ReminderDoneReason.BuiltHabit
+                    "done_felt_energized" -> com.mythara.behavior.BehaviorEventStore.ReminderDoneReason.FeltEnergized
+                    "done_easier" -> com.mythara.behavior.BehaviorEventStore.ReminderDoneReason.EasierThanExpected
+                    "done_realised" -> com.mythara.behavior.BehaviorEventStore.ReminderDoneReason.Realised
+                    else -> null
+                }
+                behaviorEvents.recordReminderDone(taskId = taskId, reason = reason)
             }
             "missed_overbooked", "missed_slept", "missed_working",
             "missed_forgot", "missed_not_relevant", "missed_other" -> {

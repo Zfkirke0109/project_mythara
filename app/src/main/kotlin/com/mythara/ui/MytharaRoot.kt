@@ -32,8 +32,10 @@ import com.mythara.ui.chat.ChatScreen
 import com.mythara.ui.fold.FoldPosture
 import com.mythara.ui.fold.RoseBloomOverlay
 import com.mythara.ui.fold.rememberFoldPosture
+import com.mythara.ui.launcher.SpotlightDrawer
 import com.mythara.ui.permissions.PermissionsScreen
 import com.mythara.ui.triage.NotificationTriageScreen
+import com.mythara.ui.usage.UsageScreen
 import com.mythara.ui.dashboard.DashboardLayout
 import com.mythara.ui.face.FaceScreen
 import com.mythara.ui.insights.InsightsScreen
@@ -173,6 +175,11 @@ fun MytharaRoot(
                     var amuletAnchor by remember {
                         mutableStateOf<androidx.compose.ui.geometry.Offset?>(null)
                     }
+                    // Spotlight drawer overlay — pull-down sheet
+                    // surfaced from a constellation chip. State
+                    // lives at the root so it can render above
+                    // every NavHost destination.
+                    var spotlightOpen by remember { mutableStateOf(false) }
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -239,6 +246,9 @@ fun MytharaRoot(
                             composable(Routes.Triage) {
                                 NotificationTriageScreen(onBack = { nav.popBackStack() })
                             }
+                            composable(Routes.Usage) {
+                                UsageScreen(onBack = { nav.popBackStack() })
+                            }
                         }
                     } else if (isTablet) {
                         DashboardLayout(
@@ -269,8 +279,13 @@ fun MytharaRoot(
                             ConstellationSlot(144f, "face", Routes.Face, MytharaColors.Bok),
                             ConstellationSlot(180f, "triage", Routes.Triage, MytharaColors.Charple),
                             ConstellationSlot(216f, "people", Routes.People, MytharaColors.Charple),
-                            ConstellationSlot(252f, "tasks", Routes.Notes, MytharaColors.Mustard),
-                            ConstellationSlot(288f, "notes", Routes.Notes, MytharaColors.Bok),
+                            // Sentinel route — handled in onSlotTap as
+                            // "open Spotlight drawer overlay" rather
+                            // than a NavHost navigate. Spotlight needs
+                            // to layer above every destination, so it
+                            // doesn't fit the NavHost route model.
+                            ConstellationSlot(252f, "drawer", ROUTE_SPOTLIGHT, MytharaColors.Mustard),
+                            ConstellationSlot(288f, "usage", Routes.Usage, MytharaColors.Mustard),
                             ConstellationSlot(324f, "me", Routes.AboutMe, MytharaColors.Malibu),
                         )
                     }
@@ -286,12 +301,28 @@ fun MytharaRoot(
                             amuletSizeDp = AMULET_SIZE_DP.value.toInt(),
                             onSlotTap = { slot ->
                                 amuletAnchor = null
-                                nav.navigate(slot.route) {
-                                    launchSingleTop = true
+                                if (slot.route == ROUTE_SPOTLIGHT) {
+                                    spotlightOpen = true
+                                } else {
+                                    nav.navigate(slot.route) {
+                                        launchSingleTop = true
+                                    }
                                 }
                             },
                             onCenterTap = { amuletAnchor = null },
                             onScrimTap = { amuletAnchor = null },
+                        )
+                    }
+
+                    // Spotlight pull-down drawer — sliding-from-top
+                    // sheet with type-search across every installed
+                    // launcher app. Rendered ABOVE the popup amulet
+                    // since the user can summon Spotlight while a
+                    // constellation is closing (and we want it on
+                    // top during that animation too).
+                    if (spotlightOpen) {
+                        SpotlightDrawer(
+                            onDismiss = { spotlightOpen = false },
                         )
                     }
 
@@ -342,6 +373,15 @@ fun MytharaRoot(
 }
 
 /**
+ * Sentinel constellation-slot "route" for chips that open an
+ * overlay (Spotlight drawer, Resonance toggle sheet, etc.) instead
+ * of triggering NavController.navigate. Handled in MytharaRoot's
+ * onSlotTap dispatcher; pure-string sentinel so chips can carry it
+ * in the same data shape as a real Routes constant.
+ */
+private const val ROUTE_SPOTLIGHT = "__overlay_spotlight"
+
+/**
  * Ordered list of "primary" destinations the user can step between
  * via swipe-left / swipe-right on the rose amulet. Chat is the
  * anchor; the others rotate around it. Secondary screens (Settings,
@@ -384,4 +424,6 @@ object Routes {
     const val Permissions = "permissions"
     /** Notification triage — see auto-dismissed, mark important. */
     const val Triage = "triage"
+    /** MiniMax API usage / quota dashboard. */
+    const val Usage = "usage"
 }
