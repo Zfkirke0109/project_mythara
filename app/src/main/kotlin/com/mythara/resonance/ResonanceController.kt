@@ -56,6 +56,14 @@ class ResonanceController @Inject constructor(
     private val loop: ResonanceLoop,
     private val settings: ResonanceSettings,
     private val watchNotifier: ResonanceWatchNotifier,
+    /** Phone-side fallback for HR — Samsung Galaxy Watches refuse to
+     *  deliver HR via the watch's Health Services MeasureClient to
+     *  third-party apps, so we read Samsung Health's batched writes
+     *  out of Health Connect on the phone instead. The wear-side
+     *  RESONANCE_HR stream still runs (on watches that allow it) and
+     *  this poller works alongside it; ResonanceHrStore dedupes by
+     *  timestamp so they can't double-count. */
+    private val hcHrPoller: ResonanceHcHrPoller,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -265,6 +273,11 @@ class ResonanceController @Inject constructor(
         _session.value = s
         hrPushCount = 0
         hrStore.start()
+        // Galaxy Watch fallback — phone polls Health Connect for HR
+        // batches written by Samsung Health, since the watch's direct
+        // Health Services HR stream never delivers to third-party apps
+        // on Samsung hardware. Always-on, since dedupe is by timestamp.
+        hcHrPoller.start()
         Log.d(TAG, "session started (target=${protocol?.displayName ?: "auto"})")
         // Hand the audio + closed loop off to the FGS; it owns
         // headphone-removal + audio-focus stops.
@@ -302,6 +315,7 @@ class ResonanceController @Inject constructor(
         analyzeJob = null
         s?.end()
         hrStore.stop()
+        hcHrPoller.stop()
         _session.value = null
         // Tell the watch — drives a confirm haptic + the pad collapses
         // (mirroring the local active flag) regardless of which stop
