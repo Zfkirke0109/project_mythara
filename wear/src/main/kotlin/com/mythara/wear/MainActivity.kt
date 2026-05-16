@@ -20,6 +20,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
@@ -67,6 +69,10 @@ import androidx.wear.compose.material.rememberSwipeToDismissBoxState
 import com.google.android.gms.wearable.Wearable
 import com.mythara.wear.resonance.ResonancePad
 import com.mythara.wear.resonance.ResonanceStore
+import com.mythara.wear.ui.ConstellationOverlay
+import com.mythara.wear.ui.MytharaRose
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.sqrt
@@ -226,7 +232,7 @@ private fun AppRoot() {
         Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
             if (!isBackground) {
                 when (val s = screen) {
-                    Screen.Home -> PttScreen(
+                    Screen.Home -> HomeScreen(
                         onOpenTasks = { screen = Screen.Tasks },
                         onOpenPeople = { screen = Screen.People },
                         onOpenCalendar = { screen = Screen.Calendar },
@@ -325,8 +331,28 @@ private fun Modifier.rotaryScroll(scrollState: androidx.compose.foundation.Scrol
 
 // ---------------------------------------------------------------- Home / PTT
 
+/**
+ * PTT-first watch home — single primary action: tap the rose to talk.
+ *
+ * Layout (top → bottom, all centered on the round watch face):
+ *  • Tiny status row: clock (HH:MM) + HR badge. ~10sp, dim. Hidden in
+ *    Resonance Mode (the eyes-free pad needs the room).
+ *  • The Mythara rose — 120 dp, slowly rotating, hex nucleus pulsing.
+ *    TAP            → start PTT (or stop if already listening).
+ *    LONG-PRESS     → open the Constellation overflow menu.
+ *    While listening: pulse speeds + a charple ring fades in.
+ *  • Below the rose: live partial transcript or hint text. ~11sp.
+ *  • Bottom subtle "↑ menu" hint.
+ *
+ * Wrist-shake on the home screen still fires startPtt — the gesture
+ * is unchanged from the previous design so anyone who learned it
+ * keeps it. Battery: the rose's Compose animation pauses when the
+ * Constellation overlay covers it (the rose composable leaves
+ * recomposition).
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PttScreen(
+private fun HomeScreen(
     onOpenTasks: () -> Unit,
     onOpenPeople: () -> Unit,
     onOpenCalendar: () -> Unit,
@@ -446,148 +472,180 @@ private fun PttScreen(
     // an unwanted interrupt.
     ShakeToTalk(enabled = !listening && !resonanceActive) { startPtt() }
 
-    // The home column is taller than the round watch face once the mic
-    // button + Resonance toggle + nav pills are stacked together — make
-    // it scrollable (touch + rotary bezel) so the bottom row of nav
-    // pills ("people" / "logs") doesn't get clipped off-screen.
-    val homeScroll = rememberScrollState()
-    Column(
+    var showConstellation by remember { mutableStateOf(false) }
+
+    // Live heart-rate badge — refreshes once a second from WatchHrStore.
+    // Null when no fresh sample (>3 min stale).
+    val hrBpm by androidx.compose.runtime.produceState(
+        initialValue = WatchHrStore.latestBpm(ctx).takeIf { WatchHrStore.isFresh(ctx) },
+        key1 = Unit,
+    ) {
+        while (true) {
+            value = WatchHrStore.latestBpm(ctx).takeIf { WatchHrStore.isFresh(ctx) }
+            kotlinx.coroutines.delay(1_000L)
+        }
+    }
+
+    // Live clock — re-renders every 30 s so HH:MM stays current
+    // without burning frames every second.
+    val nowMs by androidx.compose.runtime.produceState(
+        initialValue = System.currentTimeMillis(),
+        key1 = Unit,
+    ) {
+        while (true) {
+            value = System.currentTimeMillis()
+            kotlinx.coroutines.delay(30_000L)
+        }
+    }
+    val clockLabel = remember(nowMs) {
+        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+            .format(java.util.Date(nowMs))
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .rotaryScroll(homeScroll)
-            .verticalScroll(homeScroll)
-            .padding(horizontal = 8.dp, vertical = 18.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            // Pull-up gesture on empty area also opens the constellation
+            // — gives the menu two ways in (rose long-press + swipe up)
+            // so it's discoverable both ways.
+            .pointerInput(Unit) {
+                detectVerticalDragGestures { _, dragAmount ->
+                    if (dragAmount < -20f && !showConstellation && !resonanceActive) {
+                        showConstellation = true
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center,
     ) {
-        Text(text = "MYTHARA", color = PURPLE, fontSize = 14.sp, textAlign = TextAlign.Center)
-
-        // Live heart-rate badge — small ♥ + BPM beneath the wordmark.
-        // Reads from WatchHrStore (the same store the watch-face HR
-        // complication consumes) and re-polls once a second so a
-        // wrist-raise / activity change is reflected within the
-        // refresh window. "--" when no fresh sample (>3 min stale).
-        val hrBpm by androidx.compose.runtime.produceState(
-            initialValue = WatchHrStore.latestBpm(ctx).takeIf { WatchHrStore.isFresh(ctx) },
-            key1 = Unit,
-        ) {
-            while (true) {
-                value = WatchHrStore.latestBpm(ctx).takeIf { WatchHrStore.isFresh(ctx) }
-                kotlinx.coroutines.delay(1_000L)
-            }
-        }
-        Spacer(Modifier.height(2.dp))
-        Text(
-            text = "♥ ${hrBpm?.toString() ?: "--"}",
-            color = Color(0xFFEB4268),
-            fontSize = 12.sp,
-            textAlign = TextAlign.Center,
-        )
-
-        // Weather + status + mic button only when NOT in a Resonance
-        // session — eyes-free mode needs the vertical room for the
-        // pad's 4 buttons + dots, and the mic tap is replaced by the
-        // Start-PTT combo (B,B) anyway.
-        if (!resonanceActive) {
-            Spacer(Modifier.height(3.dp))
-            Text(
-                text = weather,
-                color = BOK,
-                fontSize = 10.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.clickable {
-                    weather = "…"
-                    scope.launch { weather = loadWeather(ctx) }
-                },
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = partial.ifBlank { status },
-                color = if (partial.isBlank()) Color(0xFF999999) else Color.White,
-                fontSize = 11.sp,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(10.dp))
-            Box(
-                modifier = Modifier
-                    .size(84.dp)
-                    .clip(CircleShape)
-                    .background(if (listening) BOK else PURPLE)
-                    .border(2.dp, Color.White.copy(alpha = 0.3f), CircleShape)
-                    .clickable { startPtt() },
-                contentAlignment = Alignment.Center,
+        if (resonanceActive) {
+            // Eyes-free Resonance Mode takes over the whole face —
+            // the discreet pad is the entire UI. Tiny exit affordance
+            // at the bottom so the user can long-press to flip back.
+            Column(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp, vertical = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(
-                    text = if (listening) "■" else "🎤",
-                    color = Color.Black,
-                    fontSize = 28.sp,
+                Text("◐ resonance", color = BOK, fontSize = 10.sp, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(8.dp))
+                ResonancePad(onStartPtt = { startPtt() })
+                Spacer(Modifier.height(6.dp))
+                Box(
+                    modifier = Modifier
+                        .size(14.dp)
+                        .clip(CircleShape)
+                        .background(BOK)
+                        .clickable {
+                            ResonanceStore.setActive(ctx, false)
+                            HeartRateService.stopStreaming(ctx)
+                            sendBytesToPhone(
+                                ctx,
+                                WearPaths.RESONANCE_TOGGLE,
+                                "off".toByteArray(Charsets.UTF_8),
+                            )
+                        },
                 )
             }
-        }
-        // Resonance toggle dot — small + low-opacity below the mic.
-        // Only rendered when the phone has enabled the feature in the
-        // secret menu; tapping it flips local active state and echoes
-        // the change to the phone.
-        if (resonanceAvailable) {
-            Spacer(Modifier.height(8.dp))
-            Box(
-                modifier = Modifier
-                    .size(18.dp)
-                    .clip(CircleShape)
-                    .background(if (resonanceActive) BOK else Color.White.copy(alpha = 0.18f))
-                    .border(1.dp, Color.White.copy(alpha = 0.30f), CircleShape)
-                    .clickable {
-                        val newActive = !resonanceActive
-                        ResonanceStore.setActive(ctx, newActive)
-                        // Bump HR sampling into fast-stream mode so the
-                        // phone gets ~1Hz samples for the analyzer +
-                        // closed loop. Drops back to the slow 3-min
-                        // baseline when the toggle goes off.
-                        if (newActive) {
-                            HeartRateService.startStreaming(ctx)
-                        } else {
-                            HeartRateService.stopStreaming(ctx)
-                        }
-                        sendBytesToPhone(
-                            ctx,
-                            WearPaths.RESONANCE_TOGGLE,
-                            (if (newActive) "on" else "off").toByteArray(Charsets.UTF_8),
+        } else {
+            // PTT-first home — three tiers stacked on the round face.
+            Column(
+                modifier = Modifier.fillMaxSize().padding(vertical = 14.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.SpaceBetween,
+            ) {
+                // Top tier: tiny clock + HR.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(clockLabel, color = DIM, fontSize = 11.sp)
+                    Spacer(Modifier.size(10.dp))
+                    Text(
+                        text = "♥ ${hrBpm?.toString() ?: "--"}",
+                        color = Color(0xFFEB4268),
+                        fontSize = 11.sp,
+                    )
+                }
+
+                // Middle tier: rose + status text.
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier
+                            .size(120.dp)
+                            .clip(CircleShape)
+                            .combinedClickable(
+                                onClick = { startPtt() },
+                                onLongClick = { showConstellation = true },
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        MytharaRose(
+                            modifier = Modifier.fillMaxSize(),
+                            listening = listening,
+                            showRing = listening,
                         )
-                    },
-            )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    val statusText = when {
+                        listening && partial.isNotBlank() -> partial
+                        listening -> "listening…"
+                        partial.isNotBlank() -> partial
+                        else -> status
+                    }
+                    Text(
+                        text = statusText,
+                        color = if (statusText == status || statusText == "listening…") DIM else Color.White,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 18.dp),
+                    )
+                }
+
+                // Bottom tier: weather + menu hint.
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = weather,
+                        color = BOK,
+                        fontSize = 9.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.clickable {
+                            weather = "…"
+                            scope.launch { weather = loadWeather(ctx) }
+                        },
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "↑ menu",
+                        color = MUTE,
+                        fontSize = 8.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
         }
 
-        Spacer(Modifier.height(10.dp))
-        if (resonanceActive) {
-            // Discreet input pad takes over the lower half — the user
-            // is in eyes-free mode and shouldn't be navigating around.
-            // Pass the host's startPtt so the Start-PTT combo (B,B)
-            // fires the recognizer locally without a phone round-trip.
-            ResonancePad(onStartPtt = { startPtt() })
-        } else {
-            // Navigation to the read-only cluster surfaces — 2×2 so the
-            // pills stay tappable on a round face. Swipe also works.
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NavPill("tasks", onOpenTasks)
-                NavPill("today", onOpenCalendar)
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NavPill("people", onOpenPeople)
-                NavPill("logs", onOpenAudit)
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "tap a tile · swipe › to go back",
-                color = MUTE,
-                fontSize = 9.sp,
-                textAlign = TextAlign.Center,
-            )
-        }
-        // Bottom breathing room so the footer / pad clears the curved
-        // edge of a round watch face when the column is scrolled fully
-        // down.
-        Spacer(Modifier.height(20.dp))
+        // Constellation overlay — long-press rose OR drag-up to open.
+        // Renders above the home content; tap scrim or rose centre to
+        // close. Toggling Resonance via this overlay always closes
+        // first so the home screen rebuilds into the eyes-free layout.
+        ConstellationOverlay(
+            visible = showConstellation,
+            resonanceAvailable = resonanceAvailable,
+            resonanceActive = resonanceActive,
+            onClose = { showConstellation = false },
+            onTasks = onOpenTasks,
+            onCalendar = onOpenCalendar,
+            onPeople = onOpenPeople,
+            onAudit = onOpenAudit,
+            onToggleResonance = {
+                val newActive = !resonanceActive
+                ResonanceStore.setActive(ctx, newActive)
+                if (newActive) HeartRateService.startStreaming(ctx)
+                else HeartRateService.stopStreaming(ctx)
+                sendBytesToPhone(
+                    ctx,
+                    WearPaths.RESONANCE_TOGGLE,
+                    (if (newActive) "on" else "off").toByteArray(Charsets.UTF_8),
+                )
+            },
+        )
     }
 }
 
