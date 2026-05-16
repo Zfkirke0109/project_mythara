@@ -465,6 +465,14 @@ fun MytharaStatusBar(
                         fontWeight = FontWeight.Medium,
                     )
                     WifiIcon(active = network.isWifi, accent = SIGNAL_COLOR, sizeDp = 14)
+                    // Dummy black round spacer between WiFi and
+                    // phone-signal icons. Visually represents
+                    // the camera pinhole's spot so the minimized
+                    // pill reads as if it threads around the
+                    // cutout, even though the pill actually sits
+                    // BELOW the cutout. Non-interactive — pure
+                    // visual stand-in.
+                    CutoutSpacerDot()
                     PhoneSignalIcon(active = network.hasCellular, accent = SIGNAL_COLOR, sizeDp = 14)
                     Box(
                         modifier = Modifier.clickable(
@@ -759,6 +767,25 @@ private fun CircularBatteryIcon(percent: Int, charging: Boolean) {
  * without needing a real blur pass.
  */
 /**
+ * Solid-black round spacer placed between the WiFi and phone-
+ * signal icons in the minimized pill. Visually represents the
+ * camera pinhole's spot — the pill reads as if it threads
+ * AROUND the cutout, even though it actually sits BELOW the
+ * cutout. Pure visual stand-in: not clickable, no glow, no
+ * state. Size matches the other minimized-state icons so it
+ * lines up cleanly.
+ */
+@Composable
+private fun CutoutSpacerDot(sizeDp: Int = 14) {
+    Box(
+        modifier = Modifier
+            .size(sizeDp.dp)
+            .clip(CircleShape)
+            .background(Color.Black),
+    )
+}
+
+/**
  * WiFi-style fan icon — three nested arcs + a dot at the base.
  * Glows in purple [accent] when connected, fades to grey
  * otherwise. Used in the minimized pill alongside
@@ -913,10 +940,8 @@ private const val ROSE_DP = 33
 private const val PTT_BUTTON_DP = 27
 
 /** Top padding from the screen top to the pill's top edge —
- *  user-specified flat value (74 dp). Replaces the earlier
- *  cutout-bottom-based math which was overshooting on overlay
- *  windows due to inset accounting. */
-private const val TOP_PADDING_DP = 74
+ *  user-specified flat value. 74 → 54 per user request. */
+private const val TOP_PADDING_DP = 54
 
 /** Width fraction of the pill when collapsed (rose + MYTHARA
  *  only, no status cluster). 0.32 ≈ 1/3 of the screen — wide
