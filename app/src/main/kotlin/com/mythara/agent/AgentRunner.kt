@@ -78,6 +78,11 @@ class AgentRunner @Inject constructor(
      *  parallel-coroutine pattern as the other post-turn extractors so
      *  a slow pass on one side doesn't stall the others. */
     private val personaTraitExtractor: com.mythara.analytics.PersonaTraitExtractor,
+    /** Capability Expansion v2 phase J — composes a 60-char
+     *  mood/persona snapshot and pushes it to the paired watch's
+     *  insight complication after every turn. Dedupes internally so
+     *  identical-payload pushes are skipped. */
+    private val personaWatchComposer: com.mythara.wear.PersonaWatchComposer,
 ) {
     /**
      * Process-wide scope. SupervisorJob so one failing turn doesn't
@@ -442,6 +447,14 @@ class AgentRunner @Inject constructor(
                     mentionedContacts = emptyList(),
                 )
             }.onFailure { Log.w(TAG, "persona-trait extraction failed: ${it.message}") }
+        }
+        // Push the latest mood/persona snapshot to the paired watch's
+        // insight complication. Phase J. Dedupes internally so an
+        // unchanged snapshot is a no-op (no Bluetooth traffic, no
+        // watch redraw).
+        scope.launch {
+            runCatching { personaWatchComposer.pushNow() }
+                .onFailure { Log.w(TAG, "persona-watch push failed: ${it.message}") }
         }
     }
 
