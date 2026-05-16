@@ -210,24 +210,22 @@ class LockscreenIslandService : Service() {
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
-        // Overlay window height — FIXED at 400dp instead of
-        // WRAP_CONTENT. The teardrop drop-down menu (which appears
-        // when the user taps to expand the pill) grows the Compose
-        // content's measured size, but WRAP_CONTENT overlay
-        // windows don't reliably auto-reflow on Android 14+, so
-        // the teardrop content ends up rendered OUTSIDE the
-        // window's touch-capture bounds — making every launcher
-        // un-clickable. Pre-sizing the window tall enough to fit
-        // the expanded state keeps every menu icon inside the
-        // window's hit region. FLAG_NOT_TOUCH_MODAL still lets
-        // touches in the empty area between the circle / menu
-        // and the window edges fall through to the underlying
-        // app, so the dead-zone trade-off is bounded to the
-        // pill+menu footprint itself.
-        val overlayHeightPx = (400f * resources.displayMetrics.density).toInt()
+        // Overlay window height starts SMALL — just enough for
+        // the collapsed circle (+ its safeTopDp top inset).
+        // 130dp covers safeTopDp (60dp) + pill height (45dp) +
+        // a few dp of breathing room. When the user taps the
+        // circle and the teardrop expands, onExpandedChange
+        // fires resizeOverlayForExpand(true) which grows the
+        // window to OVERLAY_EXPANDED_HEIGHT_DP so the launchers
+        // are inside the touch zone. Collapse shrinks it back.
+        //
+        // Without this dynamic resize, the overlay window
+        // captured touches in a 400dp tall zone CONSTANTLY,
+        // blocking chat scrolls, back gestures, and every tap
+        // underneath — exactly what the user reported.
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
-            overlayHeightPx,
+            collapsedHeightPx(),
             type,
             flags,
             PixelFormat.TRANSLUCENT,
@@ -277,6 +275,18 @@ class LockscreenIslandService : Service() {
                         // Mythara comes to foreground on the
                         // requested screen, per user spec.
                         onRoseTap = { launchMytharaRoute("chat") },
+                        // Dynamically resize the overlay window
+                        // when the pill expands / collapses.
+                        // Without this the overlay covers a tall
+                        // touch-capture zone EVEN when the pill
+                        // is just a small circle — blocking
+                        // chat scrolls, back gestures, and every
+                        // tap underneath. Now the window shrinks
+                        // back to a small footprint around the
+                        // circle when collapsed.
+                        onExpandedChange = { isExpanded ->
+                            resizeOverlayForExpand(isExpanded)
+                        },
                         onOpenAboutMe = { launchMytharaRoute("about-me") },
                         onOpenPeople = { launchMytharaRoute("people") },
                         onOpenMemory = { launchMytharaRoute("memory") },
@@ -313,6 +323,41 @@ class LockscreenIslandService : Service() {
         }
         overlayView = null
         windowManager = null
+    }
+
+    /* ------------------------------------------------- overlay sizing */
+
+    /** Collapsed overlay window height in PIXELS. Computed from
+     *  the device's density so it adapts across screen
+     *  classes. Covers the safeTopDp + circle. */
+    private fun collapsedHeightPx(): Int =
+        (OVERLAY_COLLAPSED_HEIGHT_DP * resources.displayMetrics.density).toInt()
+
+    /** Expanded overlay window height in PIXELS — tall enough
+     *  to fit the teardrop drop-down menu fully inside the
+     *  touch-capture zone. */
+    private fun expandedHeightPx(): Int =
+        (OVERLAY_EXPANDED_HEIGHT_DP * resources.displayMetrics.density).toInt()
+
+    /**
+     * Resize the overlay's WindowManager window when the pill
+     * toggles between collapsed (small circle) and expanded
+     * (full teardrop). Critical for not blocking touches on
+     * the underlying app when the pill is just a small circle.
+     *
+     * Wrapped in runCatching because WindowManager.updateViewLayout
+     * can throw if the view's been detached between the click
+     * registering and the size change applying.
+     */
+    private fun resizeOverlayForExpand(expanded: Boolean) {
+        val v = overlayView ?: return
+        val wm = windowManager ?: return
+        val params = v.layoutParams as? WindowManager.LayoutParams ?: return
+        val newHeight = if (expanded) expandedHeightPx() else collapsedHeightPx()
+        if (params.height == newHeight) return
+        params.height = newHeight
+        runCatching { wm.updateViewLayout(v, params) }
+            .onFailure { Log.w(TAG, "updateViewLayout failed: ${it.message}") }
     }
 
     /**
@@ -378,6 +423,18 @@ class LockscreenIslandService : Service() {
         private const val TAG = "Mythara/IslandOverlay"
         private const val CHANNEL_ID = "mythara_island_overlay"
         private const val NOTIFICATION_ID = 7711
+
+        /** Window height when the pill is COLLAPSED (just the
+         *  circle). Covers the safeTopDp position + circle +
+         *  small bottom padding. Anything below is reachable
+         *  for the underlying app. */
+        private const val OVERLAY_COLLAPSED_HEIGHT_DP = 130
+
+        /** Window height when the pill is EXPANDED (teardrop
+         *  with status row + 2×4 launcher grid). Sized to
+         *  comfortably contain the whole teardrop so every
+         *  launcher icon is in the touch-capture zone. */
+        private const val OVERLAY_EXPANDED_HEIGHT_DP = 400
 
         /** Intent extra MainActivity reads to land directly on a
          *  named route after the overlay launches it. Currently

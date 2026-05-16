@@ -133,6 +133,15 @@ fun MytharaStatusBar(
      *  API stability with existing callers; no longer affects
      *  rendering. */
     blackZoneHeightDp: Int = 0,
+    /** Notifies the host every time the pill's expanded state
+     *  toggles. The OVERLAY variant uses this to dynamically
+     *  resize its WindowManager window — collapsed = a tiny
+     *  window around the circle so all touches below pass
+     *  through to the underlying app; expanded = a tall window
+     *  that fits the teardrop menu so the launchers are
+     *  inside the touch-capture zone. The in-app variant
+     *  leaves it default no-op. */
+    onExpandedChange: (Boolean) -> Unit = {},
 ) {
     val ctx = LocalContext.current
 
@@ -274,6 +283,12 @@ fun MytharaStatusBar(
     // change). Tap during the expanded window resets to a fresh
     // window via the user.
     LaunchedEffect(expanded) {
+        // Notify host (overlay service uses this to resize its
+        // WindowManager window so the teardrop only captures
+        // touches when it's actually visible — otherwise the
+        // empty overlay zone blocks scrolls + back gestures
+        // on whatever's underneath).
+        onExpandedChange(expanded)
         if (expanded) {
             kotlinx.coroutines.delay(AUTO_COLLAPSE_MS)
             expanded = false
