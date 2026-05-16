@@ -165,6 +165,46 @@ class AboutMeViewModel @Inject constructor(
     data class RecommendedPerson(val name: String, val reason: String)
     data class SuggestedApp(val label: String, val detail: String)
 
+    /**
+     * "Live persona" — what [com.mythara.analytics.PersonaTraitExtractor]
+     * has inferred from per-turn lexical analysis, aggregated across
+     * the [LearningVault]. Distinct from [SelfBigFive] which comes
+     * from the batch [com.mythara.persona.SelfPersonaBuilder] (chat-
+     * history imports + Gemma). The per-turn pipeline runs default-on
+     * after every chat turn and accumulates faceted records under
+     * `kind:trait` + `target:self`.
+     *
+     * `seen` (the number of distinct turns the observation has been
+     * reinforced across) is the confidence proxy — UI shows it as
+     * a small caption beside each item so the user can tell a
+     * one-off remark from a stable pattern.
+     */
+    data class LivePersona(
+        /** Big Five derived as `pos - neg` counts per trait, signed
+         *  (negative = leans low on the trait). */
+        val bigFive: List<TraitScore>,
+        /** Schwartz values — top by total lexical hits. */
+        val values: List<TraitScore>,
+        /** Likes / dislikes / wants / avoids. */
+        val preferences: List<PreferenceEntry>,
+        /** Things the user keeps worrying about. */
+        val concerns: List<TraitScore>,
+        /** Most-frequent label per comm-style axis (length / register
+         *  / mode / emoji / energy). */
+        val commStyle: Map<String, String>,
+        /** Total persona-trait records the extractor has written so
+         *  far; surfaced as a "based on N observations" caption. */
+        val observations: Int,
+    )
+
+    data class TraitScore(val name: String, val score: Int, val seen: Int)
+    data class PreferenceEntry(
+        /** "likes" / "dislikes" / "wants" / "avoids" */
+        val predicate: String,
+        val obj: String,
+        val seen: Int,
+    )
+
     data class Ui(
         val loading: Boolean = true,
         val selfBigFive: SelfBigFive? = null,
@@ -181,6 +221,10 @@ class AboutMeViewModel @Inject constructor(
         val deviceSensors: String? = null,
         val knownFacts: List<String> = emptyList(),
         val vaultTotal: Int = 0,
+        /** Per-turn-derived persona snapshot from [PersonaTraitExtractor].
+         *  Null until at least one persona-trait record has been
+         *  written; renders an empty-state hint when null. */
+        val livePersona: LivePersona? = null,
         /** Live HR — most recent sample read directly from Health
          *  Connect, refreshed every [LIVE_HR_POLL_MS] while the
          *  About-Me screen is alive. Null until the first read
@@ -331,6 +375,12 @@ class AboutMeViewModel @Inject constructor(
             .take(10)
             .map { it.content.trim() }
 
+        // 8) Live persona — aggregate the per-turn records the
+        //    PersonaTraitExtractor has been writing since the last
+        //    Capability Expansion v2 commit. All rows are `kind:trait`
+        //    + `target:self` in the Semantic tier.
+        val livePersona = buildLivePersona(semantic)
+
         return Ui(
             loading = false,
             selfBigFive = selfBigFive,
@@ -347,6 +397,100 @@ class AboutMeViewModel @Inject constructor(
             deviceSensors = deviceSensors,
             knownFacts = knownFacts,
             vaultTotal = total,
+            livePersona = livePersona,
+        )
+    }
+
+    /**
+     * Roll up every `kind:trait` + `target:self` row into a compact
+     * snapshot for the AboutMe panels. Aggregation rules:
+     *
+     *  • Big Five: each row carries `trait:<name>` + `polarity:high|low`.
+     *    Sum (highCount - lowCount) per trait, weighted by `seen`. Sort
+     *    by absolute magnitude so the strongest signals surface first.
+     *  • Values: each row carries `value:<name>`. Sum `seen` per value.
+     *  • Preferences: each row carries `predicate:<verb>` + `object:<noun>`.
+     *    Group by (predicate, object), sum `seen`. Most-reinforced first.
+     *  • Concerns: each row carries `topic:<noun>`. Sum `seen` per topic.
+     *  • Comm-style: each row carries `axis:<axis>` + `label:<value>`.
+     *    Pick the most-frequent label per axis.
+     */
+    private fun buildLivePersona(semantic: List<LearningEntity>): LivePersona? {
+        val rows = semantic
+            .filter { vault.decodeFacets(it).any { f -> f == "kind:trait" } }
+            .filter { vault.decodeFacets(it).any { f -> f == "target:self" } }
+        if (rows.isEmpty()) return null
+
+        data class Bucket(var score: Int = 0, var seen: Int = 0)
+        val bigFiveBuckets = mutableMapOf<String, Bucket>()
+        val valueBuckets = mutableMapOf<String, Bucket>()
+        val prefBuckets = mutableMapOf<Pair<String, String>, Int>()
+        val concernBuckets = mutableMapOf<String, Int>()
+        val styleVotes = mutableMapOf<String, MutableMap<String, Int>>()
+
+        for (row in rows) {
+            val facets = vault.decodeFacets(row)
+            val dim = facets.firstOrNull { it.startsWith("dim:") }?.removePrefix("dim:")
+            val seen = row.seen.coerceAtLeast(1)
+            when (dim) {
+                "big5" -> {
+                    val trait = facets.firstOrNull { it.startsWith("trait:") }?.removePrefix("trait:") ?: continue
+                    val polarity = facets.firstOrNull { it.startsWith("polarity:") }?.removePrefix("polarity:")
+                    val sign = if (polarity == "high") 1 else if (polarity == "low") -1 else 0
+                    val b = bigFiveBuckets.getOrPut(trait) { Bucket() }
+                    b.score += sign * seen
+                    b.seen += seen
+                }
+                "values" -> {
+                    val v = facets.firstOrNull { it.startsWith("value:") }?.removePrefix("value:") ?: continue
+                    val b = valueBuckets.getOrPut(v) { Bucket() }
+                    b.score += seen
+                    b.seen += seen
+                }
+                "preference" -> {
+                    val pred = facets.firstOrNull { it.startsWith("predicate:") }?.removePrefix("predicate:") ?: continue
+                    val obj = facets.firstOrNull { it.startsWith("object:") }?.removePrefix("object:") ?: continue
+                    prefBuckets[pred to obj] = (prefBuckets[pred to obj] ?: 0) + seen
+                }
+                "concern" -> {
+                    val topic = facets.firstOrNull { it.startsWith("topic:") }?.removePrefix("topic:") ?: continue
+                    concernBuckets[topic] = (concernBuckets[topic] ?: 0) + seen
+                }
+                "comm-style" -> {
+                    val axis = facets.firstOrNull { it.startsWith("axis:") }?.removePrefix("axis:") ?: continue
+                    val label = facets.firstOrNull { it.startsWith("label:") }?.removePrefix("label:") ?: continue
+                    styleVotes.getOrPut(axis) { mutableMapOf() }
+                        .let { it[label] = (it[label] ?: 0) + seen }
+                }
+            }
+        }
+
+        val bigFive = bigFiveBuckets.entries
+            .map { (trait, b) -> TraitScore(trait, b.score, b.seen) }
+            .sortedByDescending { kotlin.math.abs(it.score) }
+        val values = valueBuckets.entries
+            .map { (name, b) -> TraitScore(name, b.score, b.seen) }
+            .sortedByDescending { it.score }
+            .take(8)
+        val preferences = prefBuckets.entries
+            .map { (k, seen) -> PreferenceEntry(k.first, k.second, seen) }
+            .sortedByDescending { it.seen }
+            .take(12)
+        val concerns = concernBuckets.entries
+            .map { (topic, seen) -> TraitScore(topic, seen, seen) }
+            .sortedByDescending { it.score }
+            .take(6)
+        val commStyle = styleVotes.mapValues { (_, votes) ->
+            votes.maxByOrNull { it.value }?.key.orEmpty()
+        }.filterValues { it.isNotEmpty() }
+
+        return LivePersona(
+            bigFive = bigFive,
+            values = values,
+            preferences = preferences,
+            concerns = concerns,
+            commStyle = commStyle,
+            observations = rows.size,
         )
     }
 
@@ -663,6 +807,16 @@ fun AboutMeScreen(
 
         Spacer(Modifier.height(12.dp))
 
+        // 2.5) Live persona — derived per chat turn, distinct from the
+        //      batch "your big five" above which comes from the
+        //      SelfPersonaBuilder import flow.
+        ui.livePersona?.let { lp ->
+            Spacer(Modifier.height(12.dp))
+            LivePersonaPanel(lp)
+        }
+
+        Spacer(Modifier.height(12.dp))
+
         // 3) Recommended people.
         Panel("recommended people") {
             if (ui.recommendedPeople.isEmpty()) {
@@ -950,6 +1104,149 @@ private fun Big5Row(label: String, value: Double) {
 @Composable
 private fun Empty(text: String) {
     Text(text, color = MytharaColors.FgDim, style = MaterialTheme.typography.bodySmall)
+}
+
+/**
+ * Render the per-turn-derived persona snapshot from
+ * [AboutMeViewModel.LivePersona]. Distinct from the batch
+ * "your big five" panel above — this one shows what Mythara has
+ * learned from your actual chats, refreshed every turn.
+ *
+ * Four sub-sections, each elided when empty:
+ *   • Big Five — signed score per trait + sign-direction badge
+ *   • Top values — Schwartz dimensions ranked by lexical hits
+ *   • Likes / dislikes — predicate-grouped preference list
+ *   • Concerns + comm-style — short caption tail
+ */
+@Composable
+private fun LivePersonaPanel(lp: AboutMeViewModel.LivePersona) {
+    Panel("what I've learned from our chats") {
+        Text(
+            text = "${Glyph.AccentBar} live persona — derived per turn from your conversations. " +
+                "Distinct from the batch profile above (which comes from imported chat history + Gemma).",
+            color = MytharaColors.FgDim,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(10.dp))
+
+        if (lp.bigFive.isNotEmpty()) {
+            Text(
+                "${Glyph.DiamondFilled} big five tendencies",
+                color = MytharaColors.Fg,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            lp.bigFive.forEach { t ->
+                val arrow = when {
+                    t.score > 0 -> "↑"
+                    t.score < 0 -> "↓"
+                    else -> "→"
+                }
+                val polarity = when {
+                    t.score > 0 -> "high"
+                    t.score < 0 -> "low"
+                    else -> "neutral"
+                }
+                val color = when {
+                    t.score > 0 -> MytharaColors.Bok
+                    t.score < 0 -> MytharaColors.Charple
+                    else -> MytharaColors.FgMute
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "$arrow ${t.name}",
+                        color = color,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "$polarity · ${t.seen} obs",
+                        color = MytharaColors.FgDim,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+
+        if (lp.values.isNotEmpty()) {
+            Text(
+                "${Glyph.DiamondFilled} top values",
+                color = MytharaColors.Fg,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = lp.values.joinToString("  ·  ") { "${it.name} (${it.seen})" },
+                color = MytharaColors.Bok,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+
+        if (lp.preferences.isNotEmpty()) {
+            Text(
+                "${Glyph.DiamondFilled} likes & dislikes",
+                color = MytharaColors.Fg,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            // Group by predicate for cleaner reading.
+            val grouped = lp.preferences.groupBy { it.predicate }
+            grouped.forEach { (predicate, entries) ->
+                val color = when (predicate) {
+                    "likes" -> MytharaColors.Bok
+                    "dislikes" -> MytharaColors.Sriracha
+                    "wants" -> MytharaColors.Mustard
+                    "avoids" -> MytharaColors.FgMute
+                    else -> MytharaColors.Fg
+                }
+                Text(
+                    text = "$predicate: " + entries.joinToString(", ") { it.obj },
+                    color = color,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(2.dp))
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        if (lp.concerns.isNotEmpty()) {
+            Text(
+                "${Glyph.DiamondFilled} on your mind",
+                color = MytharaColors.Fg,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = lp.concerns.joinToString("  ·  ") { it.name },
+                color = MytharaColors.Charple,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+
+        if (lp.commStyle.isNotEmpty()) {
+            Text(
+                "${Glyph.DiamondFilled} how you write to me",
+                color = MytharaColors.Fg,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = lp.commStyle.entries.joinToString("  ·  ") { (k, v) -> "$k=$v" },
+                color = MytharaColors.FgDim,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(6.dp))
+        }
+
+        Text(
+            "${Glyph.AccentBar} based on ${lp.observations} observations from your chats",
+            color = MytharaColors.FgDim,
+            style = MaterialTheme.typography.labelSmall,
+        )
+    }
 }
 
 /** Compact "5 s ago / 12 m ago / 3 h ago / Mar 4, 2:15 PM" formatter
