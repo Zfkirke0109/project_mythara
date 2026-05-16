@@ -62,11 +62,13 @@ import com.mythara.ui.theme.Glyph
 import com.mythara.ui.theme.MytharaColors
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
@@ -81,9 +83,113 @@ class PeopleViewModel @Inject constructor(
     private val repo: ContactProfileRepository,
     private val builder: ContactAnalyticsBuilder,
     @ApplicationContext private val appContext: Context,
+    /** Source for the per-turn live-persona records the
+     *  PersonaTraitExtractor writes after every chat turn. Filtered
+     *  per-contact when the user selects a profile. */
+    private val vault: com.mythara.secret.observe.vault.LearningVault,
 ) : ViewModel() {
     val profiles: StateFlow<List<ContactProfileRow>> =
         repo.dao.observeAll().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * Per-turn-derived persona snapshot for a single contact. Lifted
+     * straight from [com.mythara.ui.about.AboutMeViewModel.LivePersona]
+     * but `target:contact:<nameKey>` instead of `target:self`. UI
+     * shape is identical so we render with the same panel composable.
+     */
+    data class ContactLivePersona(
+        val nameKey: String,
+        val bigFive: List<com.mythara.ui.about.AboutMeViewModel.TraitScore>,
+        val values: List<com.mythara.ui.about.AboutMeViewModel.TraitScore>,
+        val preferences: List<com.mythara.ui.about.AboutMeViewModel.PreferenceEntry>,
+        val concerns: List<com.mythara.ui.about.AboutMeViewModel.TraitScore>,
+        val observations: Int,
+    )
+
+    private val _selectedLivePersona =
+        MutableStateFlow<ContactLivePersona?>(null)
+    val selectedLivePersona: StateFlow<ContactLivePersona?> =
+        _selectedLivePersona.asStateFlow()
+
+    /** Called from PeopleScreen when the user picks a contact. Pulls
+     *  every `kind:trait` + `target:contact:<nameKey>` row from the
+     *  vault and aggregates it the same way AboutMe does for self. */
+    fun loadLivePersonaFor(nameKey: String) {
+        viewModelScope.launch {
+            _selectedLivePersona.value = withContext(Dispatchers.IO) {
+                buildContactPersona(nameKey)
+            }
+        }
+    }
+
+    private suspend fun buildContactPersona(nameKey: String): ContactLivePersona? {
+        val all = runCatching {
+            vault.listByTier(com.mythara.memory.Tier.Semantic, limit = 1000)
+        }.getOrDefault(emptyList())
+        val rows = all
+            .filter { row ->
+                val facets = vault.decodeFacets(row)
+                "kind:trait" in facets && "target:contact:$nameKey" in facets
+            }
+        if (rows.isEmpty()) return null
+
+        data class Bucket(var score: Int = 0, var seen: Int = 0)
+        val bigFiveBuckets = mutableMapOf<String, Bucket>()
+        val valueBuckets = mutableMapOf<String, Bucket>()
+        val prefBuckets = mutableMapOf<Pair<String, String>, Int>()
+        val concernBuckets = mutableMapOf<String, Int>()
+
+        for (row in rows) {
+            val facets = vault.decodeFacets(row)
+            val dim = facets.firstOrNull { it.startsWith("dim:") }?.removePrefix("dim:")
+            val seen = row.seen.coerceAtLeast(1)
+            when (dim) {
+                "big5" -> {
+                    val trait = facets.firstOrNull { it.startsWith("trait:") }?.removePrefix("trait:") ?: continue
+                    val polarity = facets.firstOrNull { it.startsWith("polarity:") }?.removePrefix("polarity:")
+                    val sign = if (polarity == "high") 1 else if (polarity == "low") -1 else 0
+                    val b = bigFiveBuckets.getOrPut(trait) { Bucket() }
+                    b.score += sign * seen
+                    b.seen += seen
+                }
+                "values" -> {
+                    val v = facets.firstOrNull { it.startsWith("value:") }?.removePrefix("value:") ?: continue
+                    val b = valueBuckets.getOrPut(v) { Bucket() }
+                    b.score += seen
+                    b.seen += seen
+                }
+                "preference" -> {
+                    val pred = facets.firstOrNull { it.startsWith("predicate:") }?.removePrefix("predicate:") ?: continue
+                    val obj = facets.firstOrNull { it.startsWith("object:") }?.removePrefix("object:") ?: continue
+                    prefBuckets[pred to obj] = (prefBuckets[pred to obj] ?: 0) + seen
+                }
+                "concern" -> {
+                    val topic = facets.firstOrNull { it.startsWith("topic:") }?.removePrefix("topic:") ?: continue
+                    concernBuckets[topic] = (concernBuckets[topic] ?: 0) + seen
+                }
+            }
+        }
+
+        return ContactLivePersona(
+            nameKey = nameKey,
+            bigFive = bigFiveBuckets.entries
+                .map { (t, b) -> com.mythara.ui.about.AboutMeViewModel.TraitScore(t, b.score, b.seen) }
+                .sortedByDescending { kotlin.math.abs(it.score) },
+            values = valueBuckets.entries
+                .map { (n, b) -> com.mythara.ui.about.AboutMeViewModel.TraitScore(n, b.score, b.seen) }
+                .sortedByDescending { it.score }
+                .take(8),
+            preferences = prefBuckets.entries
+                .map { (k, s) -> com.mythara.ui.about.AboutMeViewModel.PreferenceEntry(k.first, k.second, s) }
+                .sortedByDescending { it.seen }
+                .take(12),
+            concerns = concernBuckets.entries
+                .map { (t, s) -> com.mythara.ui.about.AboutMeViewModel.TraitScore(t, s, s) }
+                .sortedByDescending { it.score }
+                .take(6),
+            observations = rows.size,
+        )
+    }
 
     private val _refreshing = MutableStateFlow(false)
     val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
@@ -211,8 +317,16 @@ fun PeopleScreen(
         Spacer(Modifier.height(12.dp))
 
         if (selected != null) {
+            // Refresh the per-contact live-persona snapshot whenever
+            // the selection changes. Cheap (single vault scan) and
+            // reads stay fresh as turns come in.
+            androidx.compose.runtime.LaunchedEffect(selected.nameKey) {
+                vm.loadLivePersonaFor(selected.nameKey)
+            }
+            val livePersona by vm.selectedLivePersona.collectAsState()
             ProfileDetail(
                 p = selected,
+                livePersona = livePersona.takeIf { it?.nameKey == selected.nameKey },
                 onSetPhoto = { uri -> vm.setContactPhoto(selected.nameKey, uri) },
                 onClearPhoto = { vm.clearContactPhoto(selected.nameKey) },
             )
@@ -476,6 +590,10 @@ private fun ProfileRow(p: ContactProfileRow, onTap: () -> Unit) {
 @Composable
 private fun ProfileDetail(
     p: ContactProfileRow,
+    /** Per-turn live-persona snapshot for THIS contact, or null when
+     *  the extractor hasn't yet logged any contact-targeted rows for
+     *  them. Loaded by PeopleScreen's LaunchedEffect on selection. */
+    livePersona: PeopleViewModel.ContactLivePersona?,
     onSetPhoto: (Uri) -> Unit,
     onClearPhoto: () -> Unit,
 ) {
@@ -646,6 +764,16 @@ private fun ProfileDetail(
             }
         }
 
+        // Per-turn-derived live persona for this contact — distinct
+        // from the batch big-five above (which comes from analytics
+        // worker). Renders the same shape AboutMe uses for self.
+        livePersona?.let { lp ->
+            Spacer(Modifier.height(12.dp))
+            DetailCard("${Glyph.DiamondOutline} live persona · learned from our chats about ${p.displayName}") {
+                ContactLivePersonaBody(lp)
+            }
+        }
+
         p.personalityInsights?.takeIf { it.isNotBlank() }?.let { insights ->
             Spacer(Modifier.height(12.dp))
             DetailCard("${Glyph.DiamondOutline} personality insights · how to message them") {
@@ -669,6 +797,122 @@ private fun ProfileDetail(
             }
         }
         Spacer(Modifier.height(40.dp))
+    }
+}
+
+/**
+ * Body of the per-contact live-persona DetailCard. Reads the same
+ * data shape AboutMe uses for self-targeted records and arranges
+ * the four sub-sections (big five tendencies, top values, likes/
+ * dislikes, on-their-mind) into a compact card.
+ *
+ * Each sub-section is elided when empty so a contact with only a
+ * few observations doesn't render an empty stub.
+ */
+@Composable
+private fun ContactLivePersonaBody(lp: PeopleViewModel.ContactLivePersona) {
+    Column {
+        if (lp.bigFive.isNotEmpty()) {
+            Text(
+                text = "${Glyph.DiamondFilled} big five tendencies",
+                color = MytharaColors.Fg,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            lp.bigFive.forEach { t ->
+                val arrow = when {
+                    t.score > 0 -> "↑"
+                    t.score < 0 -> "↓"
+                    else -> "→"
+                }
+                val polarity = when {
+                    t.score > 0 -> "high"
+                    t.score < 0 -> "low"
+                    else -> "neutral"
+                }
+                val color = when {
+                    t.score > 0 -> MytharaColors.Bok
+                    t.score < 0 -> MytharaColors.Charple
+                    else -> MytharaColors.FgMute
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "$arrow ${t.name}",
+                        color = color,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "$polarity · ${t.seen} obs",
+                        color = MytharaColors.FgDim,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+
+        if (lp.values.isNotEmpty()) {
+            Text(
+                "${Glyph.DiamondFilled} top values",
+                color = MytharaColors.Fg,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = lp.values.joinToString("  ·  ") { "${it.name} (${it.seen})" },
+                color = MytharaColors.Bok,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(10.dp))
+        }
+
+        if (lp.preferences.isNotEmpty()) {
+            Text(
+                "${Glyph.DiamondFilled} likes & dislikes",
+                color = MytharaColors.Fg,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            val grouped = lp.preferences.groupBy { it.predicate }
+            grouped.forEach { (predicate, entries) ->
+                val color = when (predicate) {
+                    "likes" -> MytharaColors.Bok
+                    "dislikes" -> MytharaColors.Sriracha
+                    "wants" -> MytharaColors.Mustard
+                    "avoids" -> MytharaColors.FgMute
+                    else -> MytharaColors.Fg
+                }
+                Text(
+                    text = "$predicate: " + entries.joinToString(", ") { it.obj },
+                    color = color,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(2.dp))
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        if (lp.concerns.isNotEmpty()) {
+            Text(
+                "${Glyph.DiamondFilled} on their mind",
+                color = MytharaColors.Fg,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = lp.concerns.joinToString("  ·  ") { it.name },
+                color = MytharaColors.Charple,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+
+        Text(
+            "${Glyph.AccentBar} based on ${lp.observations} observations across our chats",
+            color = MytharaColors.FgDim,
+            style = MaterialTheme.typography.labelSmall,
+        )
     }
 }
 
