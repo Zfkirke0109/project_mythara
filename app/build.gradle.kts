@@ -13,7 +13,12 @@ android {
 
     defaultConfig {
         applicationId = "com.mythara"
-        minSdk = 26
+        // minSdk bumped 26 → 29 for Meta DAT Camera (mwdat-camera:0.7.0
+        // declares minSdk=29). The target cluster (Pixel 10 Pro, Pixel
+        // 9 Pro Fold, Pixel Tablet) is all far above this so no devices
+        // drop off. The original 26 floor was chosen for legacy phones
+        // we don't actually run on.
+        minSdk = 29
         targetSdk = 36
         versionCode = 1
         versionName = "0.0.1"
@@ -227,23 +232,12 @@ dependencies {
     // display: render UI on the glasses (text / icons / buttons /
     //          images / video) with button-click callbacks routed back.
     //
-    // *** UNCOMMENT THESE ONCE GITHUB_TOKEN IS CONFIGURED ***
-    // The Meta DAT SDK lives on GitHub Packages and the build returns
-    // 401 without a token. Steps:
-    //   1. Generate a GitHub PAT with `read:packages` scope:
-    //      https://github.com/settings/tokens?type=beta
-    //   2. Add `github_token=ghp_xxx...` to local.properties (gitignored)
-    //      OR export GITHUB_TOKEN=ghp_xxx... in your shell
-    //   3. Uncomment these three lines
-    //   4. Wire the real SDK calls in com.mythara.glasses.GlassesDatFacade
-    //
-    // Until that's done, com.mythara.glasses.GlassesDatFacade ships
-    // stub bodies that no-op gracefully so the rest of v3 (face
-    // pipeline, lifeline tagging, contact interactions, captioning,
-    // glasses memory screen) keeps building + working.
-    // implementation(libs.mwdat.core)
-    // implementation(libs.mwdat.camera)
-    // implementation(libs.mwdat.display)
+    // Pulled from Meta's GitHub Packages registry — needs a read:packages
+    // PAT in `github_token=...` (local.properties, gitignored) or the
+    // GITHUB_TOKEN env var. See settings.gradle.kts maven block.
+    implementation(libs.mwdat.core)
+    implementation(libs.mwdat.camera)
+    implementation(libs.mwdat.display)
 
     // Capability Expansion v3 — TensorFlow Lite for MobileFaceNet
     // (128-D face embeddings). Base runtime gives us Interpreter for
