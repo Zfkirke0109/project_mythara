@@ -303,9 +303,23 @@ object GlassesDatFacade {
             Log.i(TAG, "startSession skipped — registration state is ${Wearables.registrationState.value}")
             return false
         }
-        if (session != null) {
-            Log.d(TAG, "startSession called but session already active")
+        // Don't trust a non-null `session` reference alone — when the
+        // device kills a session asynchronously (via session.errors
+        // emitting then state -> STOPPED), our refs can stay set even
+        // though the SDK considers the session dead. Verify against
+        // the live state.value; treat STOPPED/CLOSED as "not active"
+        // and proceed to open a fresh session.
+        val activeState = session?.state?.value
+        if (session != null && activeState != null &&
+            activeState != DeviceSessionState.STOPPED &&
+            activeState != DeviceSessionState.STOPPING
+        ) {
+            Log.d(TAG, "startSession called but session already active (state=$activeState)")
             return true
+        }
+        if (session != null) {
+            Log.d(TAG, "startSession — clearing stale dead session ref (state=$activeState)")
+            cleanupSessionRefs()
         }
 
         _lastSessionError.value = null
@@ -399,6 +413,13 @@ object GlassesDatFacade {
                     }
                     DeviceSessionState.STOPPED -> {
                         _connectionState.value = GlassesConnectionState.Disconnected
+                        // Without this the session/stream/display refs
+                        // stay set after the device kills the session,
+                        // so the next startSession tap short-circuits
+                        // with "session already active" — even though
+                        // it's dead. Cleaning here is idempotent.
+                        cleanupSessionRefs()
+                        return@collect
                     }
                     else -> Unit
                 }
@@ -454,6 +475,19 @@ object GlassesDatFacade {
         runCatching { session?.removeStream() }
         runCatching { session?.removeDisplay() }
         runCatching { session?.stop() }
+        cleanupSessionRefs()
+        if (Wearables.registrationState.value == RegistrationState.REGISTERED) {
+            _connectionState.value = GlassesConnectionState.Paired
+        } else {
+            _connectionState.value = GlassesConnectionState.Disconnected
+        }
+    }
+
+    /** Null out cached session/stream/display refs + cancel all the
+     *  per-session collector jobs. Used both by [stopSession] (full
+     *  shutdown) and by the session.state collector when the SDK
+     *  reports STOPPED async (device killed it). Idempotent. */
+    private fun cleanupSessionRefs() {
         stream = null
         display = null
         session = null
@@ -461,11 +495,6 @@ object GlassesDatFacade {
         displayStateJob?.cancel(); displayStateJob = null
         sessionStateJob?.cancel(); sessionStateJob = null
         sessionErrorJob?.cancel(); sessionErrorJob = null
-        if (Wearables.registrationState.value == RegistrationState.REGISTERED) {
-            _connectionState.value = GlassesConnectionState.Paired
-        } else {
-            _connectionState.value = GlassesConnectionState.Disconnected
-        }
     }
 
     /** Capture a still from the glasses POV. Returns null when no
