@@ -222,14 +222,18 @@ fun MytharaStatusBar(
     // single horizontal line BENEATH the cutout. The clock and
     // battery clusters are visible at the strip's edges and the
     // island is just centered between them.
-    val cutoutTopDp = WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
-    val statusTopDp = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-    val safeTopDp = when {
-        cutout != null -> cutout.bottomDp + 4f       // 4dp gap below the cutout
-        cutoutTopDp.value > 0f -> cutoutTopDp.value
-        statusTopDp.value > 0f -> statusTopDp.value
-        else -> PIXEL_PINHOLE_FLOOR_DP.toFloat()
-    }
+    // Top padding hardcoded to TOP_PADDING_DP per user spec —
+    // earlier cutout-based math was overshooting (the overlay
+    // window's `cutout.bottomDp` was inflating to include the
+    // system-status-bar inset, giving ~84 dp instead of the
+    // expected ~26 dp pinhole bottom). A flat value gets us
+    // a deterministic gap on every device + a single place to
+    // tune it.
+    @Suppress("UNUSED_VARIABLE") val cutoutTopDp =
+        WindowInsets.displayCutout.asPaddingValues().calculateTopPadding()
+    @Suppress("UNUSED_VARIABLE") val statusTopDp =
+        WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val safeTopDp = TOP_PADDING_DP.toFloat()
 
     // ───── Collapsed ↔ Expanded Dynamic Island state machine ─────
     //
@@ -402,7 +406,8 @@ fun MytharaStatusBar(
                     Text(
                         text = nowFmt,
                         color = MytharaColors.Fg,
-                        fontSize = 11.sp,
+                        // 11sp → 17sp (1.5× scale with the pill).
+                        fontSize = 17.sp,
                         fontWeight = FontWeight.Medium,
                     )
                     SignalDots(litCount = network.bars, accent = SIGNAL_COLOR)
@@ -435,7 +440,8 @@ fun MytharaStatusBar(
                     Text(
                         text = "${battery.percent}%",
                         color = MytharaColors.FgMute,
-                        fontSize = 10.sp,
+                        // 10sp → 15sp (1.5× scale).
+                        fontSize = 15.sp,
                     )
                     CircularBatteryIcon(percent = battery.percent, charging = battery.charging)
                 }
@@ -445,9 +451,10 @@ fun MytharaStatusBar(
             Text(
                 text = "MYTHARA",
                 color = RoseGeometry.Lavender,
-                fontSize = 10.sp,
+                // 10sp → 15sp + letter-spacing 1.5 → 2.25sp (1.5× scale).
+                fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp,
+                letterSpacing = 2.25.sp,
             )
         }
     }
@@ -525,7 +532,8 @@ private fun PttButton() {
     ) {
         Text(
             text = "🎙",
-            fontSize = 10.sp,
+            // 10sp → 15sp (1.5× scale).
+            fontSize = 15.sp,
         )
     }
 }
@@ -590,7 +598,8 @@ private fun MeAvatar(onClick: () -> Unit) {
             Text(
                 text = initial,
                 color = RoseGeometry.Lavender,
-                fontSize = 9.sp,
+                // 9sp → 13.5sp (1.5× scale).
+                fontSize = 13.5.sp,
                 fontWeight = FontWeight.Bold,
             )
         }
@@ -705,7 +714,8 @@ private fun CircularBatteryIcon(percent: Int, charging: Boolean) {
             Text(
                 text = "⚡",
                 color = accent,
-                fontSize = 9.sp,
+                // 9sp → 13.5sp (1.5× scale with the rest of the pill).
+                fontSize = 13.5.sp,
             )
         }
     }
@@ -721,14 +731,15 @@ private fun CircularBatteryIcon(percent: Int, charging: Boolean) {
 private fun SignalDots(litCount: Int, accent: Color) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        // 2dp → 3dp + 5dp → 8dp (1.5× scale with the pill).
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
         repeat(SIGNAL_BAR_COUNT) { i ->
             val lit = i < litCount
             Dot(
                 accent = if (lit) accent else GREY,
                 glow = lit,
-                sizeDp = 5,
+                sizeDp = 8,
             )
         }
     }
@@ -747,14 +758,15 @@ private fun HealthDot(label: String, health: ApiStatusStore.ApiHealth, accent: C
         ApiStatusStore.ApiHealth.Offline -> GREY to false
         ApiStatusStore.ApiHealth.Error -> ERROR_COLOR to true
     }
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
         Text(
             text = label,
             color = color,
-            fontSize = 9.sp,
+            // 9sp → 13.5sp + dot 7 → 10 (1.5× scale).
+            fontSize = 13.5.sp,
             fontWeight = FontWeight.Bold,
         )
-        Dot(accent = color, glow = glow, sizeDp = 7)
+        Dot(accent = color, glow = glow, sizeDp = 10)
     }
 }
 
@@ -769,19 +781,25 @@ private fun Dot(accent: Color, glow: Boolean, sizeDp: Int) {
     )
 }
 
-/** Status-strip height — slim like a regular Android status
- *  bar, per user spec ("just decrease the height like a regular
- *  notification status bar"). 30dp is the comfortable minimum
- *  that still fits the clock + glyphs at 10-11sp without
- *  clipping the descenders. */
-internal const val STRIP_HEIGHT_DP = 30
+/** Pill height per user spec — 45 dp (1.5× the original 30 dp).
+ *  Bigger touch target + better fits the expanded cluster
+ *  without crowding the glyphs. Inner content sizes scale by
+ *  the same 1.5× factor so the visual proportions stay right. */
+internal const val STRIP_HEIGHT_DP = 45
 
-/** Rose icon size inside the consolidated pill. */
-private const val ROSE_DP = 22
+/** Rose icon size inside the pill. 22 dp → 33 dp (1.5×). */
+private const val ROSE_DP = 33
 
-/** PTT mic button diameter. Same scale as the API health dots
- *  + Me avatar so the cluster reads uniformly. */
-private const val PTT_BUTTON_DP = 18
+/** PTT mic button diameter. 18 dp → 27 dp (1.5×). Same scale
+ *  as the API health dots + Me avatar so the cluster reads
+ *  uniformly. */
+private const val PTT_BUTTON_DP = 27
+
+/** Top padding from the screen top to the pill's top edge —
+ *  user-specified flat value (74 dp). Replaces the earlier
+ *  cutout-bottom-based math which was overshooting on overlay
+ *  windows due to inset accounting. */
+private const val TOP_PADDING_DP = 74
 
 /** Width fraction of the pill when collapsed (rose + MYTHARA
  *  only, no status cluster). 0.32 ≈ 1/3 of the screen — wide
@@ -837,8 +855,10 @@ const val OVERLAY_BLACK_ZONE_HEIGHT_DP = 64
  *  devices (24dp), with 4dp of extra clearance. */
 const val OVERLAY_PILL_TOP_INSET_DP = 28
 private const val SIGNAL_BAR_COUNT = 4
-private const val BATTERY_ICON_DP = 16
-private const val ME_AVATAR_DP = 18
+// Both scaled 1.5× alongside ROSE_DP / PTT_BUTTON_DP so the
+// cluster proportions stay consistent inside the 45 dp pill.
+private const val BATTERY_ICON_DP = 24       // was 16
+private const val ME_AVATAR_DP = 27          // was 18
 
 /** Last-resort top padding when neither displayCutout nor
  *  statusBars insets report anything (launcher mode + non-cutout
