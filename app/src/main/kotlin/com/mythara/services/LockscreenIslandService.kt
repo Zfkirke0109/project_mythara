@@ -186,17 +186,26 @@ class LockscreenIslandService : Service() {
         // We DO want touches INSIDE the window to land on the
         // pill — that's how the user controls the app from any
         // foreground context. So the window is sized via
-        // MATCH_PARENT width + WRAP_CONTENT height but its
-        // touch-capturing area is gated by the pill's actual
-        // rendered footprint via the inner Box wrapper (with
-        // contentAlignment = TopCenter the empty area to the
-        // left/right of the collapsed pill is INSIDE the window
-        // bounds but Compose passes the touch to the pill, not
-        // the empty regions). Trade-off: a small "dead zone" to
-        // either side of the collapsed pill where touches don't
-        // reach the underlying app. Acceptable because the pill
-        // is small and the alternative (WRAP_CONTENT width with
-        // updateViewLayout calls every expand) is heavier.
+        // WRAP_CONTENT in both axes: the WindowManager carves out
+        // a region that's only as big as the pill / teardrop
+        // actually paints, and FLAG_NOT_TOUCH_MODAL passes
+        // everything outside that region through to the
+        // underlying app.
+        //
+        // Earlier this used MATCH_PARENT width on the assumption
+        // that "Compose passes the touch to the pill, not the
+        // empty regions" — that's false. Compose's pointer
+        // dispatching only routes events through the COMPOSE
+        // node tree, but the WindowManager hit-test happens
+        // BEFORE Compose ever runs. Any tap inside the window's
+        // rect is owned by the window. So full-width meant the
+        // top 130dp of every other app was a touch dead-zone,
+        // breaking search bars + back gestures across the whole
+        // device.
+        //
+        // WRAP_CONTENT does require a layout pass per expand /
+        // collapse, but the pill only resizes on user action so
+        // the cost is negligible.
         // Window-flag posture for an overlay that:
         //  • LETS underlying-app touches fall through anywhere the
         //    overlay doesn't paint (FLAG_NOT_TOUCH_MODAL)
@@ -240,8 +249,8 @@ class LockscreenIslandService : Service() {
         // blocking chat scrolls, back gestures, and every tap
         // underneath — exactly what the user reported.
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            collapsedHeightPx(),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             flags,
             PixelFormat.TRANSLUCENT,
@@ -356,22 +365,27 @@ class LockscreenIslandService : Service() {
         (OVERLAY_EXPANDED_HEIGHT_DP * resources.displayMetrics.density).toInt()
 
     /**
-     * Resize the overlay's WindowManager window when the pill
+     * Re-trigger a WindowManager layout pass when the pill
      * toggles between collapsed (small circle) and expanded
-     * (full teardrop). Critical for not blocking touches on
-     * the underlying app when the pill is just a small circle.
+     * (full teardrop). With WRAP_CONTENT params, the WindowManager
+     * picks up the new measured size automatically — we just need
+     * to poke it via updateViewLayout so the host window's
+     * touch-capture rect resyncs with the Compose content's
+     * actual footprint. Without this nudge, the window keeps the
+     * old (smaller) size and the launchers fall outside the
+     * touchable area.
      *
      * Wrapped in runCatching because WindowManager.updateViewLayout
      * can throw if the view's been detached between the click
      * registering and the size change applying.
      */
-    private fun resizeOverlayForExpand(expanded: Boolean) {
+    private fun resizeOverlayForExpand(@Suppress("UNUSED_PARAMETER") expanded: Boolean) {
         val v = overlayView ?: return
         val wm = windowManager ?: return
         val params = v.layoutParams as? WindowManager.LayoutParams ?: return
-        val newHeight = if (expanded) expandedHeightPx() else collapsedHeightPx()
-        if (params.height == newHeight) return
-        params.height = newHeight
+        // Force the WindowManager to re-measure. WRAP_CONTENT
+        // sometimes caches the prior measured size; touching
+        // params + updateViewLayout invalidates the cache.
         runCatching { wm.updateViewLayout(v, params) }
             .onFailure { Log.w(TAG, "updateViewLayout failed: ${it.message}") }
     }
