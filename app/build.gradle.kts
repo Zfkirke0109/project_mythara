@@ -72,6 +72,11 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "/META-INF/DEPENDENCIES"
+            // JSch + jspecify both ship a META-INF OSGI manifest at
+            // identical paths; the merger crashes on the collision.
+            // Picking the first one is fine — we don't consume OSGI
+            // metadata at runtime.
+            pickFirsts += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
     }
 
@@ -163,6 +168,16 @@ dependencies {
     // companion app's push-to-talk transcripts. The Wear module
     // (:wear) speaks the same client API to send messages back.
     implementation(libs.play.services.wearable)
+
+    // JSch (Maxim Wiede fork) — pure-Java SSH client used by the
+    // `linux_vm` agent tool to reach the Android 15 Linux Terminal
+    // Debian VM. The Android system image does not bundle an `ssh`
+    // binary on PATH, so a JVM SSH client is the only path that
+    // works without external setup beyond the Linux Terminal's own
+    // openssh-server install. Modernised fork (over the original
+    // jcraft jsch 0.1.55) so it supports current key formats
+    // (ed25519, ecdsa) and recent algorithm negotiation.
+    implementation("com.github.mwiede:jsch:0.2.20")
 
     // Shizuku — privileged-shell shim. The user installs the Shizuku
     // app + bootstraps it once via adb (or wireless debugging), which
