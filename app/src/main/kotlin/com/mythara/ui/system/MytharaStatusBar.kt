@@ -512,11 +512,11 @@ private fun Dot(accent: Color, glow: Boolean, sizeDp: Int) {
 }
 
 /** Status-strip height. Sized to comfortably contain the
- *  Dynamic Island pill (36dp tall per Pixel cutout dimensions
- *  documented in DynamicIsland.kt) plus a few dp of vertical
- *  breathing room so the pill doesn't kiss the strip's clipping
- *  edges. */
-internal const val STRIP_HEIGHT_DP = 44
+ *  Dynamic Island pill (54dp tall — halved from 108dp per user
+ *  spec) plus a few dp of vertical breathing room. Strip BG
+ *  layer height stays under the pill height so the pill visibly
+ *  floats over the chrome rather than being clipped to it. */
+internal const val STRIP_HEIGHT_DP = 38
 private const val SIGNAL_BAR_COUNT = 4
 private const val BATTERY_ICON_DP = 16
 private const val ME_AVATAR_DP = 18

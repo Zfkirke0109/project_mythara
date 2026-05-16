@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -181,9 +182,17 @@ private fun SinglePill(
     showingInsight: Boolean,
     onTap: () -> Unit,
 ) {
+    // SpaceBetween arrangement so the rose hugs the LEFT edge of
+    // the pill and the MYTHARA text (or insight chip) hugs the
+    // RIGHT edge — per user spec "left and right justify the
+    // rose and Mythara text respectively". Fixed width via
+    // widthIn(min, max) so the pill stays compact and never
+    // takes more than ~1/3 of the screen even when an insight
+    // expands the right text.
     Row(
         modifier = modifier
             .height(PILL_HEIGHT_DP.dp)
+            .widthIn(min = (PILL_HEIGHT_DP * 2).dp, max = SINGLE_PILL_MAX_WIDTH_DP.dp)
             .clip(RoundedCornerShape(PILL_HEIGHT_DP.dp))
             .background(PILL_BG)
             .clickable(
@@ -191,10 +200,9 @@ private fun SinglePill(
                 indication = null,
                 onClick = onTap,
             )
-            .animateContentSize(animationSpec = tween(durationMillis = 220))
-            .padding(horizontal = 10.dp),
+            .padding(horizontal = TEXT_PILL_HPAD_DP.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Box(modifier = Modifier.scale(pulseScale)) {
             RoseMarkSpinning(
@@ -204,27 +212,31 @@ private fun SinglePill(
             )
         }
         if (showingInsight) {
-            Box(
-                modifier = Modifier
-                    .size(ACCENT_DOT_DP.dp)
-                    .clip(CircleShape)
-                    .background(insight?.accent ?: MytharaColors.Charple),
-            )
-            Spacer(Modifier.width(2.dp))
-            Text(
-                text = insight?.text.orEmpty().take(MAX_INSIGHT_CHARS),
-                color = insight?.accent ?: MytharaColors.Fg,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(ACCENT_DOT_DP.dp)
+                        .clip(CircleShape)
+                        .background(insight?.accent ?: MytharaColors.Charple),
+                )
+                Text(
+                    text = insight?.text.orEmpty().take(MAX_INSIGHT_CHARS),
+                    color = insight?.accent ?: MytharaColors.Fg,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                )
+            }
         } else {
             Text(
                 text = "MYTHARA",
                 color = RoseGeometry.Lavender,
-                fontSize = 20.sp,
+                fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 3.sp,
+                letterSpacing = 2.sp,
             )
         }
     }
@@ -308,10 +320,11 @@ private fun WrappingPills(
                     indication = null,
                     onClick = onTap,
                 )
+                .widthIn(max = (WRAP_TEXT_MAX_WIDTH_DP + TEXT_PILL_HPAD_DP * 2).dp)
                 .animateContentSize(animationSpec = tween(durationMillis = 220))
-                .padding(horizontal = 24.dp),
+                .padding(horizontal = TEXT_PILL_HPAD_DP.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             if (showingInsight) {
                 Box(
@@ -323,7 +336,7 @@ private fun WrappingPills(
                 Text(
                     text = insight?.text.orEmpty().take(MAX_INSIGHT_CHARS),
                     color = insight?.accent ?: MytharaColors.Fg,
-                    fontSize = 22.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                 )
@@ -331,9 +344,9 @@ private fun WrappingPills(
                 Text(
                     text = "MYTHARA",
                     color = RoseGeometry.Lavender,
-                    fontSize = 20.sp,
+                    fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
-                    letterSpacing = 3.sp,
+                    letterSpacing = 2.sp,
                 )
             }
         }
@@ -381,21 +394,35 @@ private fun RoseMarkSpinning(
     }
 }
 
-/** Pill height — TRIPLED from the previous 36dp per user spec.
- *  The 3x size makes the island a prominent UI element rather
- *  than a discreet status-bar accent, with the rose + MYTHARA
- *  text rendered LARGE on either side of the cutout. The pill's
- *  vertical center is anchored to the cutout's vertical center
- *  via the wrap math, so a 108dp pill extends ~54dp above and
- *  below the cutout — the chrome-style background of the
- *  MytharaStatusBar's bg layer (44dp tall) is shorter than the
- *  pill, so the pill visibly overflows below the strip and reads
- *  as "the island floats over the chrome", matching the user's
- *  ask "leave a current-island-size space in the middle before
- *  putting the Mythara logo and Mythara text on either side". */
-private const val PILL_HEIGHT_DP = 108
-private const val ROSE_DP = 60
-private const val ACCENT_DOT_DP = 14
+/** Pill height — halved from 108dp → 54dp per user spec ("1/2
+ *  the height"). With the rose-left + text-right justification
+ *  below, the pill reads as a tight compact island rather than
+ *  the previous full-bleed banner. Single-pill mode width is
+ *  capped at SINGLE_PILL_MAX_WIDTH_DP so it can't overshoot the
+ *  user's "1/3 screen" ask on large displays either. */
+private const val PILL_HEIGHT_DP = 54
+private const val ROSE_DP = 30
+private const val ACCENT_DOT_DP = 8
+
+/** Maximum width of the single-pill (no-cutout) layout. Targets
+ *  ~1/3 of a Pixel-class phone screen at xxhdpi (~410dp wide,
+ *  so 137dp ≈ 1/3). On larger displays it'll just be capped at
+ *  this absolute value, which is the right call for a status-
+ *  bar pill (you don't want it scaling indefinitely with the
+ *  device). */
+private const val SINGLE_PILL_MAX_WIDTH_DP = 140
+
+/** Inner padding for the right (text) pill — scales with pill
+ *  height. 14% chosen so MYTHARA reads tight against the right
+ *  edge without kissing it. */
+private const val TEXT_PILL_HPAD_DP = 8
+
+/** Maximum width of the right wrap-pill's text area. Without a
+ *  cap, animateContentSize lets MYTHARA pull the pill out to
+ *  full screen width when the cutout is small + the text is set
+ *  to a big point size. 90dp comfortably fits "MYTHARA" at the
+ *  current 12sp + letter-spacing 2sp. */
+private const val WRAP_TEXT_MAX_WIDTH_DP = 90
 private const val MAX_INSIGHT_CHARS = 28
 private const val POLL_INTERVAL_MS = 500L
 
