@@ -107,26 +107,64 @@
                 <Image resource="rose" />
             </PartImage>
 
+            <!-- Day + date row, between the rose and the time. Three
+                 PartText elements with Template/Parameter expressions
+                 driving the dynamic strings — WFF's TimeText format
+                 attribute apparently only handles HH/mm tokens, but
+                 the Template/Parameter pattern (proven to work on
+                 complication text) interpolates date fields via
+                 typed parameter expressions.
+                   • Day abbreviation (e.g. "SAT") — purple.
+                   • " | " pipe — neon cyan (same #68FFD6 as the
+                     rose nucleus / time colon).
+                   • "MAY 16" date — purple.
+                 The day name uses [DAY_OF_WEEK_S] (short form,
+                 single-line), month uses [MONTH_S], day-of-month
+                 uses [DAY] — all are standard WFF template
+                 parameters listed in the format reference. -->
+            <PartText x="115" y="222" width="100" height="22">
+                <Text align="END">
+                    <Font family="jetbrains_mono_regular" size="15"
+                        weight="BOLD" slant="NORMAL" color="#ff9b86ff">
+                        <Template><![CDATA[%s]]><Parameter expression="[DAY_OF_WEEK_S]" /></Template>
+                    </Font>
+                </Text>
+            </PartText>
+            <PartText x="215" y="222" width="20" height="22">
+                <Text align="CENTER">
+                    <Font family="jetbrains_mono_regular" size="16"
+                        weight="BOLD" slant="NORMAL"
+                        color="#ff68ffd6"><![CDATA[|]]></Font>
+                </Text>
+            </PartText>
+            <PartText x="235" y="222" width="100" height="22">
+                <Text align="START">
+                    <Font family="jetbrains_mono_regular" size="15"
+                        weight="BOLD" slant="NORMAL" color="#ff9b86ff">
+                        <Template><![CDATA[%s %d]]><Parameter expression="[MONTH_S]" /><Parameter expression="[DAY]" /></Template>
+                    </Font>
+                </Text>
+            </PartText>
+
             <!-- Time HH:MM — split into 3 columns so each piece gets
-                 its own colour: hours in neon purple (with glow via
-                 the soft fill colour mix), colon in neon cyan, minutes
-                 in neon purple. Total width 252 px centred on canvas
-                 (canvas width 450 → x=99 to x=351). -->
-            <DigitalClock x="99" y="225" width="100" height="80">
+                 its own colour: hours in neon purple, colon in neon
+                 cyan, minutes in neon purple. Moved down to y=255 to
+                 make room for the day/date row above. -->
+            <DigitalClock x="99" y="255" width="100" height="80">
                 <TimeText format="hh" hourFormat="24" align="END"
                     x="0" y="0" width="100" height="80">
                     <Font family="jetbrains_mono_regular" size="56"
                         weight="NORMAL" slant="NORMAL" color="#ff9b86ff" />
                 </TimeText>
             </DigitalClock>
-            <PartText x="199" y="225" width="52" height="80">
+            <PartText x="199" y="255" width="52" height="80">
                 <Text align="CENTER">
                     <Font family="jetbrains_mono_regular" size="56"
                         weight="NORMAL" slant="NORMAL"
                         color="#ff68ffd6"><![CDATA[:]]></Font>
                 </Text>
             </PartText>
-            <DigitalClock x="251" y="225" width="100" height="80">
+            <DigitalClock x="251" y="255" width="100" height="80">
                 <TimeText format="mm" align="START"
                     x="0" y="0" width="100" height="80">
                     <Font family="jetbrains_mono_regular" size="56"
@@ -140,8 +178,10 @@
                  hex nucleus + the time colon above). Multiple <Font>
                  children inside a single <Text> let each glyph carry
                  its own colour without needing 13 separately-
-                 positioned PartText elements. -->
-            <PartText x="0" y="305" width="450" height="24">
+                 positioned PartText elements. Moved down to y=340
+                 to follow the time's relocation (made room for the
+                 day/date row above). -->
+            <PartText x="0" y="340" width="450" height="24">
                 <Text align="CENTER">
                     <Font family="jetbrains_mono_regular" size="14" weight="BOLD" color="#ff9b86ff"><![CDATA[M]]></Font>
                     <Font family="jetbrains_mono_regular" size="14" weight="BOLD" color="#ff68ffd6"><![CDATA[.]]></Font>
@@ -159,8 +199,11 @@
                 </Text>
             </PartText>
 
-            <!-- Complication slot 1 — bottom-left. Default: heart rate. -->
-            <ComplicationSlot slotId="1" x="80" y="360" width="100" height="40"
+            <!-- Complication slot 1 — bottom-left. Default: heart rate.
+                 Moved down to y=378 along with the time + wordmark to
+                 keep visual spacing consistent now that the day/date
+                 row sits above the time. -->
+            <ComplicationSlot slotId="1" x="80" y="378" width="100" height="40"
                 supportedTypes="SHORT_TEXT EMPTY">
                 <BoundingOval x="0" y="0" width="100" height="40" />
                 <DefaultProviderPolicy
@@ -181,7 +224,7 @@
             </ComplicationSlot>
 
             <!-- Complication slot 2 — bottom-right. Default: watch battery. -->
-            <ComplicationSlot slotId="2" x="270" y="360" width="100" height="40"
+            <ComplicationSlot slotId="2" x="270" y="378" width="100" height="40"
                 supportedTypes="SHORT_TEXT EMPTY">
                 <BoundingOval x="0" y="0" width="100" height="40" />
                 <DefaultProviderPolicy
