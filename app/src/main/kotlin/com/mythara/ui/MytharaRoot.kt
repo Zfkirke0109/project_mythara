@@ -236,28 +236,17 @@ fun MytharaRoot(
                     // lives at the root so it can render above
                     // every NavHost destination.
                     var spotlightOpen by remember { mutableStateOf(false) }
-                    // Two-row layout: status bar TAKES its own row
-                    // at the top (so screen content beneath isn't
-                    // overlapped by it), then the active layout +
-                    // overlays fill the remaining space below.
-                    androidx.compose.foundation.layout.Column(
-                        modifier = Modifier.fillMaxSize(),
-                    ) {
-                    MytharaStatusBar(
-                        onRoseTap = {
-                            nav.navigate(Routes.Chat) {
-                                launchSingleTop = true
-                                popUpTo(Routes.Chat) { inclusive = false }
-                            }
-                        },
-                        onOpenAboutMe = { nav.navigate(Routes.AboutMe) { launchSingleTop = true } },
-                        onOpenPeople = { nav.navigate(Routes.People) { launchSingleTop = true } },
-                        onOpenMemory = { nav.navigate(Routes.Memory) { launchSingleTop = true } },
-                        onOpenTasks = { nav.navigate(Routes.Tasks) { launchSingleTop = true } },
-                        onOpenUsage = { nav.navigate(Routes.Usage) { launchSingleTop = true } },
-                        onOpenSettings = { nav.navigate(Routes.Settings) { launchSingleTop = true } },
-                        onOpenTriage = { nav.navigate(Routes.Triage) { launchSingleTop = true } },
-                    )
+                    // Phase E.1 — the top-status-bar Column is gone.
+                    // MytharaSpine now overlays the right edge of
+                    // the same Box that holds the NavHost, freeing
+                    // both top + bottom edges and matching the
+                    // Mythara Minimal aesthetic (ambient breathing
+                    // bar instead of a circle-at-top that competed
+                    // with the camera cutout). The launcher panel
+                    // slides out from the right edge on tap; the
+                    // existing in-app callbacks pass through
+                    // unchanged. MytharaStatusBar.kt is left in the
+                    // codebase one release for safe rollback.
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
@@ -708,8 +697,29 @@ fun MytharaRoot(
                         )
                     }
 
+                    // Phase E.1 — MytharaSpine on the right edge.
+                    // Z-ordered above the NavHost + amulet so the
+                    // launcher panel slides over whatever's behind
+                    // it, but BELOW the secret-unlock + bloom
+                    // overlays so those system surfaces still take
+                    // visual precedence when active.
+                    com.mythara.ui.system.MytharaSpine(
+                        onRoseTap = {
+                            nav.navigate(Routes.Chat) {
+                                launchSingleTop = true
+                                popUpTo(Routes.Chat) { inclusive = false }
+                            }
+                        },
+                        onOpenAboutMe = { nav.navigate(Routes.AboutMe) { launchSingleTop = true } },
+                        onOpenPeople = { nav.navigate(Routes.People) { launchSingleTop = true } },
+                        onOpenMemory = { nav.navigate(Routes.Memory) { launchSingleTop = true } },
+                        onOpenTasks = { nav.navigate(Routes.Tasks) { launchSingleTop = true } },
+                        onOpenUsage = { nav.navigate(Routes.Usage) { launchSingleTop = true } },
+                        onOpenSettings = { nav.navigate(Routes.Settings) { launchSingleTop = true } },
+                        onOpenTriage = { nav.navigate(Routes.Triage) { launchSingleTop = true } },
+                    )
+
                     } // end inner Box (layout + overlays)
-                    } // end outer Column (status bar + inner Box)
 
                     // Suppress unused warning — RoseGeometry is used
                     // by Constellation / Amulet / Bloom imports.
