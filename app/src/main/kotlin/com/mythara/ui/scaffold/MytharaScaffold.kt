@@ -8,12 +8,15 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -80,7 +83,24 @@ fun MytharaScaffold(
     content: @Composable BoxScope.() -> Unit,
 ) {
     Box(modifier = modifier.fillMaxSize().background(MytharaColors.Bg)) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        // The inner Column is status-bar-inset-padded so the 44 dp
+        // header sliver (glyph + title + back chip) always sits
+        // BELOW the system status bar / Dynamic Island. Without
+        // this, the header was occluded by the cutout on every
+        // Pixel + foldable — and on screens whose "logo" lives in
+        // the header (e.g. the ◉ glyph on SecretSettings) the tap
+        // target was unreachable behind the Island.
+        //
+        // We DON'T inset the outer Box itself so the body still
+        // paints edge-to-edge against the wallpaper — only the
+        // chrome stack is pushed down. Inner screens that want
+        // their content edge-to-edge can opt back out with
+        // `.consumeWindowInsets(...)` inside their own body.
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.statusBars),
+        ) {
             if (title != null || glyph != null || onBack != null) {
                 ScaffoldHeader(title = title, glyph = glyph, onBack = onBack)
             }
