@@ -44,29 +44,50 @@ fun MytharaRose(
     modifier: Modifier = Modifier,
     listening: Boolean = false,
     showRing: Boolean = false,
+    /** Whether to animate the rose itself (slow rotation + hex
+     *  nucleus pulse). When false, the rose is rendered as a fully
+     *  static still — the only motion in the composable is the
+     *  optional [showRing] (still inert when [animated] is false).
+     *  Used by RoseWithGlow on the wear home where the user wants
+     *  ONLY the purple particles to move; the PTT button itself
+     *  must be perfectly still. */
+    animated: Boolean = true,
 ) {
-    val transition = rememberInfiniteTransition(label = "rose")
-    val rotation by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(90_000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "rose-rotation",
-    )
-    val pulsePeriodMs = if (listening) 1_250 else 5_000  // 0.8 Hz / 0.2 Hz
-    val pulse by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(pulsePeriodMs, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "rose-pulse",
-    )
+    val rotation: Float
+    val pulse: Float
+    if (animated) {
+        val transition = rememberInfiniteTransition(label = "rose")
+        rotation = transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(90_000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "rose-rotation",
+        ).value
+        val pulsePeriodMs = if (listening) 1_250 else 5_000  // 0.8 Hz / 0.2 Hz
+        pulse = transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(pulsePeriodMs, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "rose-pulse",
+        ).value
+    } else {
+        // Static render — rose stays at rotation 0 with hex nucleus
+        // at full brightness. No Compose animation infrastructure is
+        // wired up so there's literally zero per-frame work coming
+        // out of this composable.
+        rotation = 0f
+        pulse = 1f
+    }
     Canvas(modifier = modifier) {
-        drawRose(rotation, pulse, listening, showRing)
+        // Suppress the listening ring entirely when animated=false —
+        // it's a pulsing visual and the caller has asked for stillness.
+        drawRose(rotation, pulse, listening, showRing && animated)
     }
 }
 

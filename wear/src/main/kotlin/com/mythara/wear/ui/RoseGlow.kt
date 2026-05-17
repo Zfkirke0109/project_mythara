@@ -52,10 +52,16 @@ fun RoseWithGlow(
             modifier = Modifier.fillMaxSize(),
             listening = listening,
         )
+        // PTT button stays perfectly STILL — no rotation, no hex
+        // pulse, no listening ring. The user-facing intent: only the
+        // purple particles drift around it. Listening feedback is
+        // delivered by the brand mark being there (tap → PTT) plus
+        // platform haptic; we don't need the rose itself to move.
         MytharaRose(
             modifier = Modifier.size(roseSize),
             listening = listening,
-            showRing = listening,
+            showRing = false,
+            animated = false,
         )
     }
 }
