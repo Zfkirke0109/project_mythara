@@ -21,7 +21,27 @@ class SettingsViewModel @Inject constructor(
     private val store: SettingsStore,
     private val gemini: GeminiVisionService,
     private val elevenLabs: ElevenLabsTtsService,
+    private val supertonicStore: com.mythara.mic.supertonic.SupertonicModelStore,
 ) : ViewModel() {
+
+    /** Mirrors [SupertonicModelStore.state] for the UI panel.
+     *  Collected eagerly so the SettingsScreen can render the
+     *  current state without explicitly fetching. */
+    val supertonicState: StateFlow<com.mythara.mic.supertonic.SupertonicModelStore.State> =
+        supertonicStore.state
+    val supertonicProgress: StateFlow<Float> = supertonicStore.progress
+
+    fun installSupertonicVoice() {
+        viewModelScope.launch {
+            runCatching { supertonicStore.ensureInstalled() }
+        }
+    }
+
+    fun removeSupertonicVoice() {
+        viewModelScope.launch {
+            runCatching { supertonicStore.wipe() }
+        }
+    }
 
     data class State(
         val region: Region = Region.Default,

@@ -384,6 +384,64 @@ fun SettingsScreen(
         }
 
         Spacer(Modifier.height(16.dp))
+        Panel("on-device voice (supertonic-2)") {
+            val sState by vm.supertonicState.collectAsState()
+            val sProgress by vm.supertonicProgress.collectAsState()
+            Text(
+                text = when (sState) {
+                    com.mythara.mic.supertonic.SupertonicModelStore.State.Installed ->
+                        "${Glyph.Check} installed — used when ElevenLabs is off / not configured"
+                    com.mythara.mic.supertonic.SupertonicModelStore.State.Downloading ->
+                        "${Glyph.Ellipsis} downloading ${(sProgress * 100).toInt()}%"
+                    com.mythara.mic.supertonic.SupertonicModelStore.State.Failed ->
+                        "${Glyph.Cross} download failed — check connection and try again"
+                    com.mythara.mic.supertonic.SupertonicModelStore.State.Idle ->
+                        "${Glyph.CircleOutline} not installed"
+                },
+                color = when (sState) {
+                    com.mythara.mic.supertonic.SupertonicModelStore.State.Installed -> MytharaColors.Julep
+                    com.mythara.mic.supertonic.SupertonicModelStore.State.Downloading -> MytharaColors.Citron
+                    com.mythara.mic.supertonic.SupertonicModelStore.State.Failed -> MytharaColors.Sriracha
+                    com.mythara.mic.supertonic.SupertonicModelStore.State.Idle -> MytharaColors.FgDim
+                },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Spacer(Modifier.padding(top = 6.dp))
+            Row {
+                when (sState) {
+                    com.mythara.mic.supertonic.SupertonicModelStore.State.Installed -> {
+                        TextButton(onClick = { vm.removeSupertonicVoice() }) {
+                            Text("${Glyph.Cross} remove (~270 MB)", color = MytharaColors.Sriracha)
+                        }
+                    }
+                    com.mythara.mic.supertonic.SupertonicModelStore.State.Downloading -> {
+                        Text(
+                            "${Glyph.Ellipsis} please wait — large files",
+                            color = MytharaColors.FgMute,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    else -> {
+                        Button(
+                            onClick = { vm.installSupertonicVoice() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MytharaColors.Charple,
+                                contentColor = MytharaColors.Fg,
+                            ),
+                        ) {
+                            Text("${Glyph.DiamondFilled} install voice (~270 MB)")
+                        }
+                    }
+                }
+            }
+            Text(
+                text = "${Glyph.AccentBar} Supertonic-2 is a 66M-param multilingual on-device TTS (en/ko/es/pt/fr). When installed, it's used in place of the bundled Android TTS whenever ElevenLabs isn't configured. Better prosody, fully offline, ~270 MB one-time download. Falls back to Android TTS if synthesis fails.",
+                style = MaterialTheme.typography.bodySmall.copy(color = MytharaColors.FgDim),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+
+        Spacer(Modifier.height(16.dp))
         Panel("model") {
             var open by remember { mutableStateOf(false) }
             Box {

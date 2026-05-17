@@ -31,6 +31,7 @@ class Tts @Inject constructor(
     @ApplicationContext private val ctx: Context,
     private val settings: SettingsStore,
     private val elevenLabs: ElevenLabsTtsService,
+    private val supertonic: com.mythara.mic.supertonic.SupertonicTtsEngine,
 ) {
 
     @Volatile private var engine: TextToSpeech? = null
@@ -140,11 +141,41 @@ class Tts @Inject constructor(
         scope.launch {
             val snap = runCatching { settings.snapshot() }.getOrNull()
             val useEleven = snap?.useElevenLabs == true && !snap.elevenLabsKey.isNullOrBlank()
-            if (useEleven) {
-                speakViaElevenLabs(text, snap!!.elevenLabsKey!!, snap.elevenLabsVoiceId, userMoodTrend)
-            } else {
-                speakViaAndroid(text, locale, userMoodTrend)
+            when {
+                useEleven ->
+                    speakViaElevenLabs(text, snap!!.elevenLabsKey!!, snap.elevenLabsVoiceId, userMoodTrend)
+
+                // Supertonic-2 on-device path — used when EL isn't
+                // configured AND the model is installed locally.
+                // Higher quality + more natural prosody than the
+                // bundled Android TTS, but it's a 270 MB one-time
+                // install via the Settings panel. When not present
+                // we fall through to system TTS so the assistant
+                // still talks.
+                supertonic.isReady() ->
+                    speakViaSupertonic(text)
+
+                else ->
+                    speakViaAndroid(text, locale, userMoodTrend)
             }
+        }
+    }
+
+    private suspend fun speakViaSupertonic(text: String) {
+        // Strip ElevenLabs audio tags ([laugh], [sigh], etc.) — the
+        // model includes them when EL is in play but Supertonic
+        // would read them literally. Same handling as the Android
+        // TTS fallback path.
+        val cleaned = com.mythara.agent.SpokenText.forSpeech(text, keepAudioTags = false)
+        if (cleaned.isBlank()) return
+        val ok = supertonic.speak(
+            text = cleaned,
+            onStart = { _speaking.value = true },
+            onDone = { _speaking.value = false },
+        )
+        if (!ok) {
+            android.util.Log.w("Mythara/Tts", "Supertonic synthesis failed; falling back to Android TTS")
+            speakViaAndroid(text, locale = null, userMoodTrend = null)
         }
     }
 
@@ -223,6 +254,7 @@ class Tts @Inject constructor(
     fun stop() {
         engine?.stop()
         elevenLabs.stop()
+        runCatching { supertonic.stop() }
         _speaking.value = false
     }
 
@@ -231,6 +263,7 @@ class Tts @Inject constructor(
         engine = null
         ready = false
         elevenLabs.stop()
+        runCatching { supertonic.release() }
         _speaking.value = false
     }
 }
