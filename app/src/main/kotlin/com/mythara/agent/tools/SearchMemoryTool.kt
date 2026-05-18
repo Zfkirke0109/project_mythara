@@ -2,6 +2,8 @@ package com.mythara.agent.tools
 
 import com.mythara.agent.Tool
 import com.mythara.agent.ToolResult
+import com.mythara.lifeline.LifelineEntity
+import com.mythara.lifeline.LifelineRepository
 import com.mythara.memory.Tier
 import com.mythara.secret.observe.vault.LearningEntity
 import com.mythara.secret.observe.vault.LearningVault
@@ -60,12 +62,15 @@ import javax.inject.Singleton
 @Singleton
 class SearchMemoryTool @Inject constructor(
     private val vault: LearningVault,
+    private val lifelineRepo: LifelineRepository,
 ) : Tool {
     override val name = "search_memory"
     override val description =
-        "Query Mythara's long-term memory (LearningVault). Combine query / contact / kind / dim / since_* " +
-            "filters with AND. Use this when the user asks what you remember about them, a contact, a topic, " +
-            "or a time window. Newest-first."
+        "Query Mythara's long-term memory: the LearningVault (chat / mood / persona / notes / " +
+            "behaviour / observe transcripts) AND the Lifeline photo archive (captions / detected " +
+            "people / place / time). Combine query / contact / kind / dim / since_* with AND. " +
+            "Photos are included by default; set include_photos=false to limit to text rows only. " +
+            "Newest-first across both surfaces."
 
     override val parameters = buildJsonObject {
         put("type", "object")
@@ -100,6 +105,13 @@ class SearchMemoryTool @Inject constructor(
                 put("type", "integer")
                 put("description", "Max rows to return. Default 12, max 50.")
             })
+            put("include_photos", buildJsonObject {
+                put("type", "boolean")
+                put("description", "Include Lifeline photo captions / metadata in the result set. " +
+                    "Default true. When true, matching photos appear as " +
+                    "`{kind:\"photo\", lifeline_id, ts_ms, caption, place, detected_contacts, mime, " +
+                    "uri, source_device}` entries alongside vault rows.")
+            })
         })
     }
 
@@ -112,6 +124,8 @@ class SearchMemoryTool @Inject constructor(
         val sinceMsRaw = args["since_ms"]?.jsonPrimitive?.contentOrNull()?.toLongOrNull()
         val limit = (args["limit"]?.jsonPrimitive?.contentOrNull()?.toIntOrNull() ?: 12)
             .coerceIn(1, 50)
+        val includePhotos = args["include_photos"]?.jsonPrimitive?.contentOrNull()
+            ?.toBooleanStrictOrNull() ?: true
 
         val sinceMs = when {
             sinceMsRaw != null -> sinceMsRaw
@@ -158,11 +172,28 @@ class SearchMemoryTool @Inject constructor(
                     .take(limit)
                     .toList()
 
+                // Photo matches — captioned Lifeline rows that match
+                // the same query / contact / since filters. Kind / dim
+                // are vault-only concepts so they bypass the photo
+                // search (an explicit kind:trait, for example, won't
+                // produce photo hits).
+                val photoMatches: List<LifelineEntity> = if (includePhotos && kind.isBlank() && dim.isBlank()) {
+                    runCatching { lifelineRepo.dao.listAllLocal() }.getOrDefault(emptyList())
+                        .asSequence()
+                        .filter { row -> matchesPhoto(row, query, contact, sinceMs) }
+                        .sortedByDescending { it.takenMs }
+                        .take(limit)
+                        .toList()
+                } else emptyList()
+
                 val out = StringBuilder("""{"matches":[""")
-                filtered.forEachIndexed { i, row ->
-                    if (i > 0) out.append(',')
+                var first = true
+                filtered.forEach { row ->
+                    if (!first) out.append(',')
+                    first = false
                     val facets = vault.decodeFacets(row)
                     out.append('{')
+                    out.append("\"kind\":\"memory\",")
                     out.append("\"ts_ms\":${row.tsMillis},")
                     out.append("\"tier\":\"${row.tier}\",")
                     out.append("\"src\":\"${row.src.escape()}\",")
@@ -172,12 +203,69 @@ class SearchMemoryTool @Inject constructor(
                     out.append("\"facets\":[${facets.joinToString(",") { "\"${it.escape()}\"" }}]")
                     out.append('}')
                 }
-                out.append("],\"count\":${filtered.size},\"scanned\":${all.size}}")
+                photoMatches.forEach { row ->
+                    if (!first) out.append(',')
+                    first = false
+                    out.append('{')
+                    out.append("\"kind\":\"photo\",")
+                    out.append("\"lifeline_id\":${row.id},")
+                    out.append("\"ts_ms\":${row.takenMs},")
+                    out.append("\"caption\":${jsonString(row.captionText.orEmpty())},")
+                    out.append("\"caption_status\":\"${row.captionStatus.escape()}\",")
+                    out.append("\"caption_model\":\"${row.captionModel.orEmpty().escape()}\",")
+                    out.append("\"user_context\":${jsonString(row.userContext.orEmpty())},")
+                    out.append("\"place\":${jsonString(row.placeLabel.orEmpty())},")
+                    if (row.lat != null && row.lng != null) {
+                        out.append("\"lat\":${row.lat},\"lng\":${row.lng},")
+                    }
+                    out.append("\"detected_contacts\":${jsonString(row.detectedContactsJson.orEmpty())},")
+                    out.append("\"mime\":\"${row.mimeType.escape()}\",")
+                    out.append("\"uri\":\"${row.uri.escape()}\",")
+                    out.append("\"source_device\":\"${(row.sourceDeviceType ?: "phone").escape()}\"")
+                    out.append('}')
+                }
+                out.append("],\"count\":${filtered.size + photoMatches.size},")
+                out.append("\"memory_count\":${filtered.size},")
+                out.append("\"photo_count\":${photoMatches.size},")
+                out.append("\"scanned\":${all.size}}")
                 ToolResult.ok(out.toString())
             }.getOrElse {
                 ToolResult.fail("search_memory_failed: ${it.message ?: it.javaClass.simpleName}")
             }
         }
+    }
+
+    /** Matching rules for a Lifeline row:
+     *   - query  → case-insensitive substring across caption_text,
+     *               user_context, place_label, detected_contacts.
+     *   - contact → matches if the contact's nameKey appears in the
+     *               detected_contacts JSON blob.
+     *   - sinceMs → taken_ms >= sinceMs. */
+    private fun matchesPhoto(
+        row: LifelineEntity,
+        query: String,
+        contact: String,
+        sinceMs: Long,
+    ): Boolean {
+        if (sinceMs > 0L && row.takenMs < sinceMs) return false
+        if (query.isNotBlank()) {
+            val haystack = buildString {
+                append(row.captionText.orEmpty()); append(' ')
+                append(row.userContext.orEmpty()); append(' ')
+                append(row.placeLabel.orEmpty()); append(' ')
+                append(row.detectedContactsJson.orEmpty()); append(' ')
+                append(row.displayName)
+            }.lowercase()
+            if (!haystack.contains(query)) return false
+        }
+        if (contact.isNotBlank()) {
+            val det = row.detectedContactsJson.orEmpty().lowercase()
+            if (!det.contains("\"$contact\"") && !det.contains(contact)) return false
+        }
+        // Skip rows that have no caption AND no user context — they
+        // carry no searchable signal and would clutter the result.
+        if (row.captionText.isNullOrBlank() && row.userContext.isNullOrBlank()) return false
+        return true
     }
 
     private fun JsonPrimitive.contentOrNull(): String? = runCatching { content }.getOrNull()

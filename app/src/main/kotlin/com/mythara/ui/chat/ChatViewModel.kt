@@ -14,7 +14,9 @@ import com.mythara.data.MessageRow
 import com.mythara.mic.LanguageDetector
 import com.mythara.mic.Tts
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -61,6 +63,7 @@ class ChatViewModel @Inject constructor(
     val musicVocabulary: com.mythara.music.MusicVocabulary,
     private val musicEncoder: com.mythara.music.MusicReplyEncoder,
     private val musicToneEngine: com.mythara.music.MusicToneEngine,
+    private val vision: com.mythara.minimax.VisionService,
 ) : ViewModel() {
     /** Local device id, cached once on init. Used to identify
      *  foreign-device chat rows for the FromOtherDevice card render. */
@@ -486,6 +489,86 @@ class ChatViewModel @Inject constructor(
         if (text.isBlank()) return
         _ui.update { it.copy(thinking = true, streaming = "", needsApiKey = false, errorBanner = null) }
         runner.submit(text, fromVoice = fromVoice)
+    }
+
+    /**
+     * Variant that handles chat-side image attachments (📎 button).
+     * Each URI is decoded, sent through [com.mythara.minimax.VisionService]
+     * for a short description, and the descriptions are merged into
+     * the user's text message before submission so the (text-only)
+     * agent model still "sees" what was attached.
+     *
+     * Submission flow:
+     *   1. Show "thinking…" immediately (the same as plain submit) so
+     *      the UI doesn't sit idle while we describe.
+     *   2. Off-main: for each attachment, copy bytes to a temp file
+     *      and call vision.describeImage(). Concurrent across all
+     *      attachments to keep latency low (each round-trip is ~3 s
+     *      on Gemini Flash; 4 attachments would be 12 s sequentially
+     *      vs. ~4 s in parallel).
+     *   3. Build augmented text:
+     *        "<user typed>
+     *
+     *         [attachment 1] <description>
+     *         [attachment 2] <description>"
+     *      When the user typed nothing (image-only turn), fall back
+     *      to "What's in these images?" so the agent has a prompt.
+     *   4. Submit the augmented text via the runner.
+     */
+    fun submitWithAttachments(text: String, uris: List<android.net.Uri>, fromVoice: Boolean) {
+        if (uris.isEmpty()) return submit(text, fromVoice)
+        _ui.update { it.copy(thinking = true, streaming = "", needsApiKey = false, errorBanner = null) }
+        viewModelScope.launch {
+            val descriptions = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                uris.map { uri ->
+                    async {
+                        runCatching { describeAttachment(uri) }
+                            .getOrElse { "couldn't describe (${it.message ?: it.javaClass.simpleName})" }
+                    }
+                }.map { it.await() }
+            }
+            val baseText = text.ifBlank { "What's in these image${if (uris.size == 1) "" else "s"}?" }
+            val merged = buildString {
+                append(baseText)
+                append("\n")
+                for ((i, desc) in descriptions.withIndex()) {
+                    append("\n[attachment ")
+                    append(i + 1)
+                    append("] ")
+                    append(desc)
+                }
+            }
+            runner.submit(merged, fromVoice = fromVoice)
+        }
+    }
+
+    /** Copy the picker URI's bytes to a temp file in cacheDir and
+     *  hand it to VisionService. Single sentence prompt — we just
+     *  need the agent to know WHAT it's looking at, not a paragraph. */
+    private suspend fun describeAttachment(uri: android.net.Uri): String {
+        val tempFile = java.io.File(
+            appCtx.cacheDir,
+            "attach_${System.currentTimeMillis()}_${kotlin.random.Random.nextInt()}.jpg",
+        )
+        appCtx.contentResolver.openInputStream(uri).use { input ->
+            if (input == null) return "couldn't read attachment"
+            tempFile.outputStream().use { output -> input.copyTo(output) }
+        }
+        return try {
+            val outcome = vision.describeImage(
+                imageFile = tempFile,
+                prompt = "Describe this image in 1-2 short sentences. " +
+                    "Focus on what's visible (subject, scene, colours, any text). " +
+                    "Don't speculate.",
+            )
+            if (outcome.ok && outcome.text.isNotBlank()) {
+                outcome.text.trim()
+            } else {
+                "couldn't describe (${outcome.code ?: "empty"})"
+            }
+        } finally {
+            runCatching { tempFile.delete() }
+        }
     }
 
     /**

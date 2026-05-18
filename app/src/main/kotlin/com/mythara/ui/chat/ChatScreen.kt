@@ -3,6 +3,8 @@ package com.mythara.ui.chat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -37,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -46,6 +50,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
@@ -374,7 +379,16 @@ fun ChatScreen(
             // — both call this callback but with different
             // `fromVoice` flags so the agent loop can produce a
             // voice-friendly short reply when the user spoke.
-            onSubmit = { text, fromVoice -> vm.submit(text, fromVoice) },
+            // `attachments` carries any image URIs the user picked
+            // via the 📎 button — empty list when no attachments
+            // are queued.
+            onSubmit = { text, attachments, fromVoice ->
+                if (attachments.isEmpty()) {
+                    vm.submit(text, fromVoice)
+                } else {
+                    vm.submitWithAttachments(text, attachments, fromVoice)
+                }
+            },
             enabled = !ui.thinking,
             incomingDictation = dictation,
             onDictationConsumed = { dictation = null },
@@ -935,7 +949,7 @@ private fun BubbleChip(label: String, color: androidx.compose.ui.graphics.Color,
 
 @Composable
 private fun Composer(
-    onSubmit: (String, Boolean) -> Unit,
+    onSubmit: (text: String, attachments: List<android.net.Uri>, fromVoice: Boolean) -> Unit,
     enabled: Boolean,
     /**
      * When non-null, this text is dropped into the composer's draft
@@ -955,6 +969,22 @@ private fun Composer(
     onToggleMusicMode: () -> Unit = {},
 ) {
     var draft by remember { mutableStateOf("") }
+    // Queued image attachments. Each entry is a content://media
+    // URI the user picked via the 📎 button. Cleared on send + on
+    // per-thumbnail × tap.
+    val attachments = remember { mutableStateListOf<android.net.Uri>() }
+    val photoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_ATTACHMENTS),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            // Cap at MAX_ATTACHMENTS total so the user can't queue
+            // 100 photos in one turn (each adds a Gemini round-trip).
+            for (u in uris) {
+                if (attachments.size >= MAX_ATTACHMENTS) break
+                attachments.add(u)
+            }
+        }
+    }
     // Apply incoming dictation exactly once per (string, identity).
     // Append to whatever the user has already typed so a half-typed
     // thought + a dictated tail merge naturally.
@@ -965,6 +995,27 @@ private fun Composer(
             onDictationConsumed()
         }
     }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Attachment thumbnail strip — only renders when something
+        // is queued. Each thumb has a × overlay to remove that
+        // specific attachment without affecting the others.
+        if (attachments.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                attachments.forEachIndexed { idx, uri ->
+                    AttachmentThumb(
+                        uri = uri,
+                        onRemove = { attachments.removeAt(idx) },
+                    )
+                }
+            }
+        }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1003,7 +1054,14 @@ private fun Composer(
             onFinal = {
                 draft = it
                 if (enabled && draft.isNotBlank()) {
-                    onSubmit(draft, /* fromVoice = */ true); draft = ""
+                    // Voice-input still ships any queued attachments
+                    // along with the spoken text — rare combo but
+                    // semantically obvious if the user attaches a
+                    // photo and then dictates "what's in this?".
+                    val pending = attachments.toList()
+                    onSubmit(draft, pending, /* fromVoice = */ true)
+                    draft = ""
+                    attachments.clear()
                 }
             },
             onError = { /* surface later via VM event channel */ },
@@ -1068,25 +1126,124 @@ private fun Composer(
                 },
             )
         }
+        // Attach (📎) button — opens the system photo picker. Lets
+        // the user queue up to MAX_ATTACHMENTS images that get
+        // described via the vision cascade (Gemini Flash by default)
+        // and merged into the user message before submission.
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(
+                    if (attachments.isNotEmpty()) MytharaColors.Charple.copy(alpha = 0.25f)
+                    else MytharaColors.Surface,
+                )
+                .border(
+                    1.dp,
+                    if (attachments.isNotEmpty()) MytharaColors.Charple else MytharaColors.SurfaceHigh,
+                    RoundedCornerShape(24.dp),
+                )
+                .clickable(enabled = enabled && attachments.size < MAX_ATTACHMENTS) {
+                    photoPicker.launch(
+                        PickVisualMediaRequest(
+                            ActivityResultContracts.PickVisualMedia.ImageOnly,
+                        ),
+                    )
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "📎",
+                color = if (attachments.isNotEmpty()) MytharaColors.Fg else MytharaColors.FgMute,
+                style = MaterialTheme.typography.titleMedium,
+            )
+        }
+
+        val canSend = enabled && (draft.isNotBlank() || attachments.isNotEmpty())
         Box(
             modifier = Modifier
                 .size(48.dp)
                 .clip(CircleShape)
-                .background(if (enabled && draft.isNotBlank()) MytharaColors.Charple else MytharaColors.Surface)
-                .border(1.dp, if (enabled && draft.isNotBlank()) MytharaColors.Charple else MytharaColors.SurfaceHigh, CircleShape)
-                .clickable(enabled = enabled && draft.isNotBlank()) {
+                .background(if (canSend) MytharaColors.Charple else MytharaColors.Surface)
+                .border(1.dp, if (canSend) MytharaColors.Charple else MytharaColors.SurfaceHigh, CircleShape)
+                .clickable(enabled = canSend) {
                     // Typed input — fromVoice=false. Long answers with
                     // markdown are fine on the chat surface, so we
                     // skip the brevity system prompt.
-                    onSubmit(draft, /* fromVoice = */ false)
+                    val pending = attachments.toList()
+                    onSubmit(draft, pending, /* fromVoice = */ false)
                     draft = ""
+                    attachments.clear()
                 },
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = if (enabled) Glyph.Arrow else Glyph.Ellipsis,
-                color = if (enabled && draft.isNotBlank()) MytharaColors.Fg else MytharaColors.FgDim,
+                color = if (canSend) MytharaColors.Fg else MytharaColors.FgDim,
                 style = MaterialTheme.typography.titleMedium,
+            )
+        }
+    }
+    } // close outer Column
+}
+
+/** Cap on simultaneous attachments per turn. Each one costs a
+ *  Gemini vision round-trip; 4 keeps the latency bounded while
+ *  still covering common "show me what's in these 3-4 pics" asks. */
+private const val MAX_ATTACHMENTS = 4
+
+/** Small thumbnail tile for a queued attachment. Bottom-right ×
+ *  removes the entry from the queue without affecting siblings. */
+@Composable
+private fun AttachmentThumb(uri: android.net.Uri, onRemove: () -> Unit) {
+    val ctx = LocalContext.current
+    val bitmap = remember(uri) {
+        runCatching {
+            ctx.contentResolver.openInputStream(uri)?.use { input ->
+                val opts = android.graphics.BitmapFactory.Options().apply {
+                    inSampleSize = 4
+                    inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+                }
+                android.graphics.BitmapFactory.decodeStream(input, null, opts)
+            }
+        }.getOrNull()
+    }
+    Box(
+        modifier = Modifier
+            .size(56.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(MytharaColors.Surface)
+            .border(1.dp, MytharaColors.SurfaceHigh, RoundedCornerShape(8.dp)),
+    ) {
+        if (bitmap != null) {
+            androidx.compose.foundation.Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp)),
+            )
+        } else {
+            Text(
+                text = "🖼",
+                color = MytharaColors.FgMute,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+        Box(
+            modifier = Modifier
+                .size(20.dp)
+                .align(Alignment.TopEnd)
+                .padding(2.dp)
+                .clip(CircleShape)
+                .background(MytharaColors.Bg.copy(alpha = 0.75f))
+                .clickable { onRemove() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "×",
+                color = MytharaColors.Sriracha,
+                style = MaterialTheme.typography.labelMedium,
             )
         }
     }
