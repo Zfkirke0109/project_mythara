@@ -504,6 +504,23 @@
             </intent-filter>
         </receiver>
 
+        <!-- Lock-screen Allow / Deny actions for confirmation-gated
+             tool calls (send_sms, send_whatsapp, place_call, …).
+             When the agent suspends on ConfirmationGate.request()
+             and the in-app dialog can't render (locked / backgrounded /
+             screen off), a notification is posted with Allow + Deny
+             actions that broadcast here. The receiver injects the
+             same ConfirmationGate singleton the tool is awaiting on
+             and resolves the deferred, unblocking the turn without
+             the user opening the app. -->
+        <receiver
+            android:name=".agent.ConfirmationActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.mythara.action.GATE_CONFIRM" />
+            </intent-filter>
+        </receiver>
+
         <!-- Reminder alarm receiver. AlarmManager fires this when a
              scheduled task's time arrives; handler announces via TTS,
              posts a notification, and updates the chat scrollback

@@ -1,11 +1,18 @@
 package com.mythara.agent
 
+import android.content.Context
 import android.util.Log
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -38,7 +45,13 @@ import javax.inject.Singleton
  * checked "Always allow this" on a prior prompt.
  */
 @Singleton
-class ConfirmationGate @Inject constructor() {
+class ConfirmationGate @Inject constructor(
+    @ApplicationContext private val ctx: Context,
+) {
+
+    /** Local scope for the lock-screen notification fallback timer.
+     *  SupervisorJob so a cancelled request doesn't tear down others. */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     enum class Decision { Allow, Deny }
 
@@ -100,9 +113,29 @@ class ConfirmationGate @Inject constructor() {
         currentRequest = req
         Log.d(TAG, "request ${req.id} tool=${req.toolName} key=${req.allowlistKey}")
         _pending.tryEmit(req)
+        // Background fallback: after a short grace period, if no UI
+        // has resolved this request yet, post a lock-screen
+        // notification with Allow + Deny actions. Lets the user
+        // approve / deny destructive tool calls from the lock screen
+        // without opening the chat surface — which is exactly what
+        // happens when the agent auto-triages an incoming message
+        // while the device is locked or backgrounded.
+        val fallbackJob = scope.launch {
+            delay(NOTIFICATION_FALLBACK_MS)
+            // Re-check inflight under lock — UI may have resolved
+            // during the delay.
+            val stillPending = synchronized(inflight) { req.id in inflight }
+            if (stillPending) {
+                runCatching { ConfirmationNotification.post(ctx, req) }
+                    .onFailure { Log.w(TAG, "fallback notif failed: ${it.message}") }
+            }
+        }
         return try {
             deferred.await()
         } finally {
+            // Cancel pending fallback + clear any posted notification.
+            runCatching { fallbackJob.cancel() }
+            runCatching { ConfirmationNotification.cancel(ctx, req.id) }
             synchronized(inflight) { inflight.remove(req.id) }
             // Clear currentRequest only if it's still the one we just
             // resolved — a second concurrent request could have moved
@@ -128,5 +161,13 @@ class ConfirmationGate @Inject constructor() {
 
     companion object {
         private const val TAG = "Mythara/Gate"
+
+        /** Grace window before falling back to the lock-screen
+         *  notification. The chat UI usually picks up the
+         *  _pending emission within hundreds of ms when it's
+         *  visible; the 4-second wait avoids posting a
+         *  notification that flashes for half a second and gets
+         *  immediately cancelled when the in-app dialog appears. */
+        const val NOTIFICATION_FALLBACK_MS = 4_000L
     }
 }
