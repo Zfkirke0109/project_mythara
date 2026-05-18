@@ -53,6 +53,10 @@ class AgentLoop @Inject constructor(
      *  prompt rarely fires the offer on its own; this deterministic
      *  hook is more reliable. */
     private val skillSuggestions: SkillSuggestionStore,
+    /** Pre-execution middleware for every tool call. Sanitises
+     *  filesystem paths, denies obviously-destructive shell
+     *  patterns, and will host future auto-approval policies. */
+    private val hookRunner: HookRunner,
 ) {
 
     /** Cached on first read — DeviceIdStore is a stable per-install
@@ -590,6 +594,12 @@ class AgentLoop @Inject constructor(
 
         var iter = 0
         var lastAssistantText = ""
+        // Per-turn guardrail — watches a rolling window of (tool,
+        // args, result) signatures and trips when the same work
+        // keeps repeating, so a buggy model can't burn the entire
+        // 8-iteration budget on a degenerate read→edit→read→edit
+        // cycle. Reset on every turn.
+        val loopDetector = LoopDetector()
 
         loop@ while (iter < MAX_ITERATIONS) {
             iter++
@@ -740,8 +750,21 @@ class AgentLoop @Inject constructor(
                 val toolContext: kotlin.coroutines.CoroutineContext =
                     if (isAutoReplyTurn) UserMessageContext(userText) + AutoReplyMarker(contactName)
                     else UserMessageContext(userText)
-                val result = kotlinx.coroutines.withContext(toolContext) {
-                    registry.execute(call.function.name, call.function.arguments)
+                // Pre-tool-use middleware. May rewrite args (path
+                // sanitiser) or short-circuit with a denial
+                // (dangerous shell pattern, future auto-approve
+                // gates). When denied, we synthesise a ToolResult.fail
+                // so the model sees a structured reason and can
+                // adapt on the next iteration.
+                val hookOutcome = hookRunner.run(call.function.name, call.function.arguments)
+                val result = if (hookOutcome.denied) {
+                    com.mythara.agent.ToolResult.fail(
+                        hookOutcome.reason ?: "blocked by safety hook",
+                    )
+                } else {
+                    kotlinx.coroutines.withContext(toolContext) {
+                        registry.execute(call.function.name, hookOutcome.args)
+                    }
                 }
                 val dt = (System.nanoTime() - t0) / 1_000_000
                 if (result.ok) skillSuggestions.recordTool(call.function.name)
@@ -756,6 +779,29 @@ class AgentLoop @Inject constructor(
                     ),
                 )
                 emit(Turn.ToolEnd(call.id, call.function.name, result.ok, result.output, dt))
+                // Loop-detection guardrail. Record this (tool, args,
+                // result) signature; if the same work has now
+                // repeated > REPEAT_THRESHOLD times in the rolling
+                // window the agent is stuck — surface an error and
+                // break out of the iteration loop before we burn
+                // the remaining budget on identical retries.
+                val stuck = loopDetector.record(
+                    toolName = call.function.name,
+                    argsJson = call.function.arguments,
+                    resultBody = result.output,
+                )
+                if (stuck) {
+                    if (isAutoReplyTurn) returnToMythara()
+                    emit(
+                        Turn.Error(
+                            message = "loop_detected: keeps calling ${call.function.name} with " +
+                                "identical args + result — halting turn before iteration budget " +
+                                "is exhausted.",
+                            retryable = false,
+                        ),
+                    )
+                    return@flow
+                }
             }
             // Continue the outer loop — the next iteration re-streams with
             // the enlarged context (including all tool results).
