@@ -458,8 +458,7 @@ fun InsightsScreen(
                                 }
                             val fill = when {
                                 isMe -> MytharaColors.Malibu
-                                node.isFavorite -> MytharaColors.Charple
-                                else -> MytharaColors.SurfaceHigh
+                                else -> nodeColorForKind(node.kind, node.isFavorite)
                             }.copy(alpha = if (dim) 0.3f else 1f)
                             drawCircle(MytharaColors.Bg, r + 3f * zoom, p)
                             drawCircle(fill, r, p)
@@ -521,6 +520,25 @@ private fun edgeColor(kind: ContactGraphBuilder.EdgeKind): Color = when (kind) {
     ContactGraphBuilder.EdgeKind.KNOWS -> MytharaColors.Charple
     ContactGraphBuilder.EdgeKind.SIMILAR -> MytharaColors.Bok
     ContactGraphBuilder.EdgeKind.SHARED_TOPIC -> MytharaColors.Mustard
+}
+
+/** Per-entity-kind node fill. Keeps the colour vocabulary in sync
+ *  with the Mythara palette: people get the brand primary, places
+ *  / orgs / apps / notification-sources each get their own
+ *  recognisable colour so the Insights graph reads as a typed
+ *  knowledge graph rather than an undifferentiated blob.
+ *
+ *  Favourite people still get a slight tint upgrade (full Charple
+ *  vs Lavender-ish) so the user's curated favourites pop. */
+private fun nodeColorForKind(kind: String, isFavorite: Boolean): Color = when (kind) {
+    com.mythara.analytics.ContactProfileRow.KIND_PERSON ->
+        if (isFavorite) MytharaColors.Charple else MytharaColors.Charple.copy(alpha = 0.78f)
+    com.mythara.analytics.ContactProfileRow.KIND_PLACE -> MytharaColors.Malibu
+    com.mythara.analytics.ContactProfileRow.KIND_ORG -> MytharaColors.Mustard
+    com.mythara.analytics.ContactProfileRow.KIND_APP -> MytharaColors.Bok
+    com.mythara.analytics.ContactProfileRow.KIND_NOTIFICATION -> MytharaColors.FgDim
+    com.mythara.analytics.ContactProfileRow.KIND_UNKNOWN -> MytharaColors.SurfaceHigh
+    else -> MytharaColors.SurfaceHigh
 }
 
 private fun edgeKindLabel(kind: ContactGraphBuilder.EdgeKind): String = when (kind) {

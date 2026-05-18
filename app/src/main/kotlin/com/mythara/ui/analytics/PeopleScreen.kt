@@ -71,6 +71,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -103,8 +104,41 @@ class PeopleViewModel @Inject constructor(
     private val contactFaceIndex: com.mythara.face.ContactFaceIndex,
     private val lifelineRepo: com.mythara.lifeline.LifelineRepository,
 ) : ViewModel() {
+    /** Visible People list — strict person-only filter so the
+     *  EntityKindClassifier verdict is the law. Anything classified
+     *  as organization / app / notification-source / place is hidden,
+     *  and unknowns are tolerated only when they haven't been
+     *  classified yet (kindClassifiedAtMs == null → pre-v7 rows the
+     *  cleanup runner hasn't touched yet). */
     val profiles: StateFlow<List<ContactProfileRow>> =
-        repo.dao.observeAll().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        repo.dao.observeAll()
+            .map { rows ->
+                rows.filter { row ->
+                    !row.isHidden &&
+                        (
+                            row.kind == ContactProfileRow.KIND_PERSON ||
+                                (row.kind == ContactProfileRow.KIND_UNKNOWN && row.kindClassifiedAtMs == null)
+                            )
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Soft-hidden rows surfaced in the Hidden Rows sub-screen for
+     *  the user to restore individually. Includes the classifier
+     *  verdict so the row can be labelled as "tagged organization",
+     *  "tagged notification-source", etc. */
+    val hiddenRows: StateFlow<List<ContactProfileRow>> =
+        repo.dao.observeHidden()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Promote a hidden row back to a person. The next CrossApp
+     *  observer pass DOESN'T re-demote because the merge path
+     *  intentionally leaves kind/hidden alone. */
+    fun restoreHiddenRow(nameKey: String) {
+        viewModelScope.launch {
+            runCatching { repo.dao.restoreAsPerson(nameKey, System.currentTimeMillis()) }
+        }
+    }
 
     /** Live list of un-promoted, un-dismissed face clusters from
      *  [com.mythara.face.UnknownFaceRepository]. Each entry has a
@@ -702,9 +736,11 @@ fun PeopleScreen(
     val report by vm.lastReport.collectAsState()
     val cleanupStatus by vm.cleanupStatus.collectAsState()
     val untaggedFaces by vm.untaggedFaces.collectAsState()
+    val hiddenRows by vm.hiddenRows.collectAsState()
     var selectedKey by remember { mutableStateOf<String?>(null) }
     val selected = profiles.firstOrNull { it.nameKey == selectedKey }
     var assignTarget by remember { mutableStateOf<com.mythara.face.UnknownFaceRow?>(null) }
+    var hiddenSheetOpen by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
 
     // Phase B — MytharaScaffold provides the header (◆ people +
@@ -841,7 +877,34 @@ fun PeopleScreen(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+            // Footer pill — surface count of soft-hidden non-people
+            // rows. Only renders when there's something to look at.
+            // Tap opens the hidden-rows sheet for one-tap restore.
+            if (hiddenRows.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                TextButton(onClick = { hiddenSheetOpen = true }) {
+                    Text(
+                        text = "${Glyph.DiamondOutline} view ${hiddenRows.size} hidden non-people",
+                        color = MytharaColors.Charple,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
         }
+    }
+
+    // Hidden non-people sheet. Same Dialog-style overlay as the
+    // assign-face sheet so the user can pull demoted rows back
+    // into the People list with one tap. Lives outside the Column
+    // scope so dismissal doesn't tear down everything.
+    if (hiddenSheetOpen) {
+        HiddenRowsSheet(
+            rows = hiddenRows,
+            onDismiss = { hiddenSheetOpen = false },
+            onRestore = { nameKey ->
+                vm.restoreHiddenRow(nameKey)
+            },
+        )
     }
 
     // Untagged-face promote sheet. Lives outside the Column scope so

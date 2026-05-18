@@ -999,6 +999,10 @@ fun SecretSettingsScreen(
 
         Spacer(Modifier.height(14.dp))
 
+        PeopleCleanupPanel(vm = vm)
+
+        Spacer(Modifier.height(14.dp))
+
         Panel("danger zone") {
             Text(
                 text = "forget everything wipes Observe scratch + the learning journal. " +
@@ -1469,6 +1473,112 @@ private fun ReorganizeMemoryPanel(vm: SecretSettingsViewModel) {
                     }
                     Spacer(Modifier.size(8.dp))
                     TextButton(onClick = { vm.startReorganizeMemory() }) {
+                        Text("${Glyph.Arrow} retry", color = MytharaColors.Charple)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * "Clean up People" — runs [com.mythara.analytics.PeopleCleanupRunner]
+ * to classify every existing ContactProfileRow and soft-hide
+ * anything that isn't a person. After completion the People list
+ * shrinks to actual humans; hidden rows live on a new "Hidden Rows"
+ * sub-screen with one-tap restore.
+ *
+ * Mirrors the Idle / Running / Done / Failed shape of the other
+ * runner panels so the UI feels consistent.
+ */
+@Composable
+private fun PeopleCleanupPanel(vm: SecretSettingsViewModel) {
+    val state by vm.peopleCleanupState.collectAsState()
+    Panel("clean up people") {
+        when (val s = state) {
+            is com.mythara.analytics.PeopleCleanupRunner.State.Idle -> {
+                Text(
+                    text = "Re-runs the entity classifier over every contact in your People list and " +
+                        "soft-hides anything that isn't a real person (notifications, weather alerts, " +
+                        "apps, brands). Hidden rows live in People → Hidden Rows with one-tap restore. " +
+                        "Favourites are never auto-hidden.",
+                    color = MytharaColors.FgDim,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = { vm.startPeopleCleanup() },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MytharaColors.Charple, contentColor = MytharaColors.Fg,
+                    ),
+                ) { Text("${Glyph.Arrow} classify + clean up") }
+            }
+            is com.mythara.analytics.PeopleCleanupRunner.State.Running -> {
+                val frac = if (s.total > 0) s.attempted / s.total.toFloat() else 0f
+                Text(
+                    text = "${Glyph.Ellipsis} classifying ${s.attempted} of ${s.total} · " +
+                        "${s.hidden} hidden",
+                    color = MytharaColors.Citron,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { frac.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MytharaColors.Charple,
+                    trackColor = MytharaColors.SurfaceHigh,
+                )
+                Spacer(Modifier.height(8.dp))
+                TextButton(onClick = { vm.cancelPeopleCleanup() }) {
+                    Text("${Glyph.Cross} cancel", color = MytharaColors.Sriracha)
+                }
+            }
+            is com.mythara.analytics.PeopleCleanupRunner.State.Done -> {
+                val r = s.report
+                Text(
+                    text = "${Glyph.Check} classified ${r.totalScanned} rows in " +
+                        "${"%.1f".format(r.durationMs / 1000.0)} s",
+                    color = MytharaColors.Julep,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "${Glyph.AccentBar} ${r.personCount} person · ${r.placeCount} place · " +
+                        "${r.orgCount} org · ${r.appCount} app · ${r.notificationCount} notification-source · " +
+                        "${r.unknownCount} unknown · ${r.hiddenCount} hidden",
+                    color = MytharaColors.FgDim,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "${Glyph.AccentBar} synced to your other Mythara devices.",
+                    color = MytharaColors.FgDim,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row {
+                    TextButton(onClick = { vm.acknowledgePeopleCleanup() }) {
+                        Text("dismiss", color = MytharaColors.FgMute)
+                    }
+                    Spacer(Modifier.size(8.dp))
+                    TextButton(onClick = { vm.startPeopleCleanup() }) {
+                        Text("${Glyph.Arrow} run again", color = MytharaColors.Charple)
+                    }
+                }
+            }
+            is com.mythara.analytics.PeopleCleanupRunner.State.Failed -> {
+                Text(
+                    text = "${Glyph.Cross} ${s.message}",
+                    color = MytharaColors.Sriracha,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row {
+                    TextButton(onClick = { vm.acknowledgePeopleCleanup() }) {
+                        Text("dismiss", color = MytharaColors.FgMute)
+                    }
+                    Spacer(Modifier.size(8.dp))
+                    TextButton(onClick = { vm.startPeopleCleanup() }) {
                         Text("${Glyph.Arrow} retry", color = MytharaColors.Charple)
                     }
                 }

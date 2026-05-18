@@ -61,6 +61,13 @@ class ContactGraphBuilder @Inject constructor(
         val hasNotes: Boolean,
         val summary: String?,
         val photoUri: String?,
+        /** Entity-kind classification from
+         *  [com.mythara.analytics.EntityKindClassifier], propagated
+         *  from the underlying [ContactProfileRow]. Drives the
+         *  per-kind node colour in the Insights graph. Defaults to
+         *  "person" so older code paths that build a Node without
+         *  setting kind paint it as a person (back-compat). */
+        val kind: String = ContactProfileRow.KIND_PERSON,
     )
 
     data class Edge(
@@ -122,6 +129,7 @@ class ContactGraphBuilder @Inject constructor(
         hasNotes = !userNotes.isNullOrBlank(),
         summary = relationshipSummary,
         photoUri = photoUri,
+        kind = kind,
     )
 
     /** The synthetic "you" node at the centre of the ego graph. Sized

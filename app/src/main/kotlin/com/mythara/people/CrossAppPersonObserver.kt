@@ -67,6 +67,7 @@ class CrossAppPersonObserver @Inject constructor(
     private val repo: ContactProfileRepository,
     private val meProfile: MeProfileStore,
     private val vault: LearningVault,
+    private val entityClassifier: com.mythara.analytics.EntityKindClassifier,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var subscription: Job? = null
@@ -106,10 +107,18 @@ class CrossAppPersonObserver @Inject constructor(
             return
         }
 
-        // Skip non-human senders (system / promo apps that survived
-        // the static dismiss filter — typically have a brand name
-        // like "Bank of X" that will create useless People rows).
-        if (looksLikeBrandSender(senderName, r.packageName)) return
+        // Classify FIRST so we can route non-persons into the
+        // hidden bucket instead of dropping them on the floor.
+        // EntityKindClassifier replaces the old single-tier
+        // looksLikeBrandSender gate — it produces a verdict
+        // (kind + confidence + reason) we persist on the row so
+        // the People-screen filter, Insights node colour, and the
+        // Hidden-Rows sub-screen all agree.
+        val verdict = entityClassifier.classifyIncoming(
+            senderName = senderName,
+            packageName = r.packageName,
+        )
+        val hideOnInsert = verdict.kind != ContactProfileRow.KIND_PERSON
 
         val nameKey = canonicalizeName(senderName)
         if (nameKey.isBlank()) return
@@ -140,11 +149,23 @@ class CrossAppPersonObserver @Inject constructor(
                 sourceAppsJson = json.encodeToString(stringList, listOf(r.packageName)),
                 isAutoAdded = true,
                 lastBuiltMs = 0L,
+                kind = verdict.kind,
+                kindConfidence = verdict.confidence,
+                kindClassifiedAtMs = now,
+                isHidden = hideOnInsert,
             )
             repo.dao.upsert(row)
-            Log.i(TAG, "auto-added person '$senderName' from ${r.packageName} ($appLabel)")
+            Log.i(
+                TAG,
+                "auto-added '$senderName' from ${r.packageName} ($appLabel) " +
+                    "kind=${verdict.kind} hidden=$hideOnInsert (${verdict.reason})",
+            )
         } else {
             // Same canonical key — merge alias + source-app and bump counts.
+            // We DON'T overwrite kind/hidden on merge: once the user has
+            // explicitly restored a row (kind=person, hidden=false), a
+            // later spammy notification mustn't re-demote it. The cleanup
+            // runner is the canonical retag path for existing rows.
             val aliases = decodeList(existing.aliasesJson).toMutableSet()
             val rawName = senderName.trim()
             if (aliases.none { it.equals(rawName, ignoreCase = true) }) aliases += rawName

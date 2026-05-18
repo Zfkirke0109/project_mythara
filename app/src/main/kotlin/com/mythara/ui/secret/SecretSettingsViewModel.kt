@@ -65,7 +65,17 @@ class SecretSettingsViewModel @Inject constructor(
     private val resonanceController: ResonanceController,
     private val recaptionAllRunner: com.mythara.lifeline.RecaptionAllRunner,
     private val memoryReorganizerRunner: com.mythara.memory.MemoryReorganizerRunner,
+    private val peopleCleanupRunner: com.mythara.analytics.PeopleCleanupRunner,
 ) : ViewModel() {
+
+    /** State of the bulk "classify every contact + hide non-people"
+     *  pass. Drives the new Settings panel. */
+    val peopleCleanupState: StateFlow<com.mythara.analytics.PeopleCleanupRunner.State>
+        get() = peopleCleanupRunner.state
+
+    fun startPeopleCleanup() = peopleCleanupRunner.start()
+    fun cancelPeopleCleanup() = peopleCleanupRunner.cancel()
+    fun acknowledgePeopleCleanup() = peopleCleanupRunner.acknowledge()
 
     /** State of the bulk "reorganize memory" pass — drives the
      *  Settings panel's button + progress / done card. */

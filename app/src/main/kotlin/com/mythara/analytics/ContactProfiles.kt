@@ -142,9 +142,49 @@ data class ContactProfileRow(
     val isAutoAdded: Boolean = false,
     /** Last time the analytics builder produced / updated this row. */
     @ColumnInfo(name = "last_built_ms") val lastBuiltMs: Long = 0,
+    /**
+     * Type-aware entity classification. Set by
+     * [com.mythara.analytics.EntityKindClassifier] either at insert
+     * time (CrossAppPersonObserver) or retroactively by
+     * [com.mythara.analytics.PeopleCleanupRunner]. The People screen
+     * only renders rows whose kind == "person" AND is_hidden == false;
+     * the Insights graph paints nodes by kind. Allowed:
+     *   person, place, organization, app, notification-source, unknown.
+     * Defaults to `unknown` for rows that pre-date the v7 migration
+     * so the cleanup pass can re-classify them.
+     */
+    @ColumnInfo(name = "kind", defaultValue = "unknown")
+    val kind: String = KIND_UNKNOWN,
+    /** Classifier confidence 0..1. Below ~0.7 flags the row for
+     *  user review on first People-screen open. */
+    @ColumnInfo(name = "kind_confidence", defaultValue = "0.5")
+    val kindConfidence: Float = 0.5f,
+    /** When the classifier last assigned the kind. Null = never;
+     *  the cleanup runner picks these up first. */
+    @ColumnInfo(name = "kind_classified_at_ms")
+    val kindClassifiedAtMs: Long? = null,
+    /**
+     * Soft-hide flag. When true, the row stays in the database
+     * (so memory sync + history are preserved) but disappears from
+     * the People-list rendering + tappable entry points. The
+     * cleanup runner flips this true for every classified non-person.
+     * A "Hidden Rows" sub-screen renders these with one-tap restore.
+     */
+    @ColumnInfo(name = "is_hidden", defaultValue = "0")
+    val isHidden: Boolean = false,
 ) {
     companion object {
         const val MIN_BIG_FIVE_SAMPLE = 6
+
+        // Canonical kind values — keep this list in sync with
+        // EntityKindClassifier + InsightsScreen.nodeColorForKind.
+        const val KIND_PERSON = "person"
+        const val KIND_PLACE = "place"
+        const val KIND_ORG = "organization"
+        const val KIND_APP = "app"
+        const val KIND_NOTIFICATION = "notification-source"
+        const val KIND_UNKNOWN = "unknown"
+        val ALL_KINDS = setOf(KIND_PERSON, KIND_PLACE, KIND_ORG, KIND_APP, KIND_NOTIFICATION, KIND_UNKNOWN)
     }
 }
 
@@ -208,6 +248,64 @@ interface ContactProfileDao {
     @Query("UPDATE contact_profiles SET source_apps_json = :json WHERE name_key = :key")
     suspend fun updateSourceApps(key: String, json: String)
 
+    /** Set the classification result for a single row. Used by both
+     *  [com.mythara.people.CrossAppPersonObserver] at insert time and
+     *  the bulk [com.mythara.analytics.PeopleCleanupRunner] pass. */
+    @Query(
+        """
+        UPDATE contact_profiles
+        SET kind = :kind,
+            kind_confidence = :conf,
+            kind_classified_at_ms = :tsMs,
+            is_hidden = :hidden
+        WHERE name_key = :key
+        """,
+    )
+    suspend fun updateKind(key: String, kind: String, conf: Float, tsMs: Long, hidden: Boolean)
+
+    /** Restore a previously-hidden row. Flips `is_hidden` back to
+     *  false and stamps it as `kind = "person"` so the user's manual
+     *  override beats the classifier's verdict on the next pass. */
+    @Query(
+        """
+        UPDATE contact_profiles
+        SET is_hidden = 0,
+            kind = 'person',
+            kind_confidence = 1.0,
+            kind_classified_at_ms = :tsMs
+        WHERE name_key = :key
+        """,
+    )
+    suspend fun restoreAsPerson(key: String, tsMs: Long)
+
+    /** Bulk-set every classifier field back to defaults so the
+     *  cleanup runner re-processes the whole table. Surfaced via a
+     *  hidden "force re-classify all" action in Settings. */
+    @Query(
+        """
+        UPDATE contact_profiles
+        SET kind = 'unknown',
+            kind_confidence = 0.5,
+            kind_classified_at_ms = NULL,
+            is_hidden = 0
+        """,
+    )
+    suspend fun resetAllKinds(): Int
+
+    /** All rows that have NEVER been classified — the bulk runner
+     *  prioritises these on its first pass. */
+    @Query(
+        "SELECT * FROM contact_profiles WHERE kind_classified_at_ms IS NULL",
+    )
+    suspend fun listUnclassified(): List<ContactProfileRow>
+
+    /** All currently-hidden rows for the "Hidden non-people"
+     *  Settings sub-screen. */
+    @Query(
+        "SELECT * FROM contact_profiles WHERE is_hidden = 1 ORDER BY last_interaction_ms DESC",
+    )
+    fun observeHidden(): Flow<List<ContactProfileRow>>
+
     /** Promote an auto-added row out of the "auto-discovered"
      *  section (e.g. user opens it + interacts → no longer flagged). */
     @Query("UPDATE contact_profiles SET is_auto_added = 0 WHERE name_key = :key")
@@ -220,7 +318,7 @@ interface ContactProfileDao {
     suspend fun clear()
 }
 
-@Database(entities = [ContactProfileRow::class], version = 6, exportSchema = false)
+@Database(entities = [ContactProfileRow::class], version = 7, exportSchema = false)
 abstract class ContactProfilesDb : RoomDatabase() {
     abstract fun profiles(): ContactProfileDao
 }
@@ -248,11 +346,27 @@ internal val MIGRATION_CONTACTS_5_6 = object : Migration(5, 6) {
     }
 }
 
+/** v6 → v7: typed entities + soft-hide. Adds:
+ *    - kind:                   entity-type classification (defaults to "unknown")
+ *    - kind_confidence:        classifier confidence 0..1
+ *    - kind_classified_at_ms:  when the classifier last ran (null = never)
+ *    - is_hidden:              soft-hide flag (default false)
+ *  All defaulted so existing rows survive cleanly. The
+ *  PeopleCleanupRunner re-classifies unknown rows on first run. */
+internal val MIGRATION_CONTACTS_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE contact_profiles ADD COLUMN kind TEXT NOT NULL DEFAULT 'unknown'")
+        db.execSQL("ALTER TABLE contact_profiles ADD COLUMN kind_confidence REAL NOT NULL DEFAULT 0.5")
+        db.execSQL("ALTER TABLE contact_profiles ADD COLUMN kind_classified_at_ms INTEGER")
+        db.execSQL("ALTER TABLE contact_profiles ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
 @Singleton
 class ContactProfileRepository @Inject constructor(@ApplicationContext ctx: Context) {
     private val db: ContactProfilesDb =
         Room.databaseBuilder(ctx, ContactProfilesDb::class.java, "mythara_contact_profiles.db")
-            .addMigrations(MIGRATION_CONTACTS_4_5, MIGRATION_CONTACTS_5_6)
+            .addMigrations(MIGRATION_CONTACTS_4_5, MIGRATION_CONTACTS_5_6, MIGRATION_CONTACTS_6_7)
             .fallbackToDestructiveMigration()
             .build()
     val dao: ContactProfileDao = db.profiles()
