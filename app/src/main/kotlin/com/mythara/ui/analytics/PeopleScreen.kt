@@ -9,7 +9,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -103,6 +105,14 @@ class PeopleViewModel @Inject constructor(
     private val faceSampler: com.mythara.face.ContactFaceSampler,
     private val contactFaceIndex: com.mythara.face.ContactFaceIndex,
     private val lifelineRepo: com.mythara.lifeline.LifelineRepository,
+    /** Per-row kind overrides — set / cleared via the long-press
+     *  picker. The classifier consults this store first so a pinned
+     *  kind wins over every heuristic. */
+    private val kindOverrides: com.mythara.analytics.ContactKindOverrideStore,
+    /** Re-runs the classifier against a single row after the user
+     *  clears an override, so the row falls back to the heuristic
+     *  verdict immediately. */
+    private val kindClassifier: com.mythara.analytics.EntityKindClassifier,
 ) : ViewModel() {
     /** Visible People list — strict person-only filter so the
      *  EntityKindClassifier verdict is the law. Anything classified
@@ -137,6 +147,56 @@ class PeopleViewModel @Inject constructor(
     fun restoreHiddenRow(nameKey: String) {
         viewModelScope.launch {
             runCatching { repo.dao.restoreAsPerson(nameKey, System.currentTimeMillis()) }
+        }
+    }
+
+    /** Per-row kind pin map — surfaced into the long-press picker so
+     *  the user sees the current pin (if any) when re-opening the
+     *  sheet on a row they've already overridden. Refreshed eagerly
+     *  on every set/clear so the UI reflects the new state without
+     *  observers. Keyed on nameKey. */
+    private val _kindOverrides = MutableStateFlow<Map<String, String>>(emptyMap())
+    val kindOverridesFlow: StateFlow<Map<String, String>> = _kindOverrides.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            _kindOverrides.value = runCatching { kindOverrides.all().mapValues { it.value.kind } }
+                .getOrDefault(emptyMap())
+        }
+    }
+
+    /** Pin this row to a specific kind. The classifier respects the
+     *  pin forever after; future re-classify passes from
+     *  PeopleCleanupRunner / CrossAppPersonObserver leave it alone.
+     *  Applies the chosen kind to the row immediately so the People
+     *  list / Hidden sub-screen updates without a re-classify pass. */
+    fun setKindOverride(nameKey: String, kind: String) {
+        viewModelScope.launch {
+            runCatching {
+                kindOverrides.set(nameKey, kind)
+                val now = System.currentTimeMillis()
+                val hidden = kind != ContactProfileRow.KIND_PERSON
+                repo.dao.updateKind(nameKey, kind, 1.0f, now, hidden)
+            }
+            _kindOverrides.value = runCatching { kindOverrides.all().mapValues { it.value.kind } }
+                .getOrDefault(emptyMap())
+        }
+    }
+
+    /** Drop the pin and re-run the classifier so the row falls back
+     *  to whatever the heuristic cascade says now (which may or may
+     *  not match the previous pinned kind). */
+    fun clearKindOverride(nameKey: String) {
+        viewModelScope.launch {
+            runCatching {
+                kindOverrides.clear(nameKey)
+                val row = repo.dao.byKey(nameKey) ?: return@runCatching
+                val v = kindClassifier.classifyExisting(row)
+                val hidden = v.kind != ContactProfileRow.KIND_PERSON
+                repo.dao.updateKind(nameKey, v.kind, v.confidence, System.currentTimeMillis(), hidden)
+            }
+            _kindOverrides.value = runCatching { kindOverrides.all().mapValues { it.value.kind } }
+                .getOrDefault(emptyMap())
         }
     }
 
@@ -741,6 +801,12 @@ fun PeopleScreen(
     val selected = profiles.firstOrNull { it.nameKey == selectedKey }
     var assignTarget by remember { mutableStateOf<com.mythara.face.UnknownFaceRow?>(null) }
     var hiddenSheetOpen by remember { mutableStateOf(false) }
+    // Long-press target for the kind-pin picker. When non-null the
+    // KindOverrideDialog mounts and lets the user pin (or clear) the
+    // row's classifier verdict. Lives at PeopleScreen scope so the
+    // sheet survives both the main list and the Hidden sub-screen.
+    var pinTarget by remember { mutableStateOf<ContactProfileRow?>(null) }
+    val kindOverrides by vm.kindOverridesFlow.collectAsState()
     val ctx = LocalContext.current
 
     // Phase B — MytharaScaffold provides the header (◆ people +
@@ -816,6 +882,7 @@ fun PeopleScreen(
                 untaggedFaces = untaggedFaces,
                 onTap = { selectedKey = it.nameKey },
                 onUntaggedFaceTap = { face -> assignTarget = face },
+                onLongPress = { row -> pinTarget = row },
                 modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.height(10.dp))
@@ -904,6 +971,27 @@ fun PeopleScreen(
             onRestore = { nameKey ->
                 vm.restoreHiddenRow(nameKey)
             },
+            onLongPressRow = { row -> pinTarget = row },
+        )
+    }
+
+    // Kind-pin picker — mounts when the user long-presses any row
+    // (either in the main People list OR in the Hidden Rows sheet).
+    // Pinning is forever — the classifier respects it on every
+    // future pass — until the user clears it.
+    pinTarget?.let { row ->
+        KindOverrideDialog(
+            row = row,
+            currentPin = kindOverrides[row.nameKey],
+            onDismiss = { pinTarget = null },
+            onPin = { kind ->
+                vm.setKindOverride(row.nameKey, kind)
+                pinTarget = null
+            },
+            onClear = {
+                vm.clearKindOverride(row.nameKey)
+                pinTarget = null
+            },
         )
     }
 
@@ -938,6 +1026,7 @@ private fun ProfileList(
     untaggedFaces: List<com.mythara.face.UnknownFaceRow>,
     onTap: (ContactProfileRow) -> Unit,
     onUntaggedFaceTap: (com.mythara.face.UnknownFaceRow) -> Unit,
+    onLongPress: (ContactProfileRow) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     if (profiles.isEmpty() && untaggedFaces.isEmpty()) {
@@ -984,7 +1073,7 @@ private fun ProfileList(
                 SectionLabel(text = "${Glyph.DiamondFilled} favourites")
             }
             items(favourites, key = { "f-" + it.nameKey }) { p ->
-                ProfileRow(p, onTap = { onTap(p) })
+                ProfileRow(p, onTap = { onTap(p) }, onLongPress = { onLongPress(p) })
             }
         }
         if (discovered.isNotEmpty()) {
@@ -995,7 +1084,7 @@ private fun ProfileList(
                 )
             }
             items(discovered, key = { "d-" + it.nameKey }) { p ->
-                ProfileRow(p, onTap = { onTap(p) })
+                ProfileRow(p, onTap = { onTap(p) }, onLongPress = { onLongPress(p) })
             }
         }
         if (everyoneElse.isNotEmpty()) {
@@ -1005,7 +1094,7 @@ private fun ProfileList(
                 }
             }
             items(everyoneElse, key = { "e-" + it.nameKey }) { p ->
-                ProfileRow(p, onTap = { onTap(p) })
+                ProfileRow(p, onTap = { onTap(p) }, onLongPress = { onLongPress(p) })
             }
         }
     }
@@ -1123,8 +1212,13 @@ private fun SectionLabel(text: String, sub: String? = null) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ProfileRow(p: ContactProfileRow, onTap: () -> Unit) {
+private fun ProfileRow(
+    p: ContactProfileRow,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit = {},
+) {
     val borderColor = if (p.isFavorite) MytharaColors.Charple else MytharaColors.SurfaceHigh
     Column(
         modifier = Modifier
@@ -1132,7 +1226,10 @@ private fun ProfileRow(p: ContactProfileRow, onTap: () -> Unit) {
             .clip(RoundedCornerShape(10.dp))
             .background(MytharaColors.Surface)
             .border(if (p.isFavorite) 1.5.dp else 1.dp, borderColor, RoundedCornerShape(10.dp))
-            .clickable { onTap() }
+            .combinedClickable(
+                onClick = onTap,
+                onLongClick = onLongPress,
+            )
             .padding(14.dp),
     ) {
         Row(

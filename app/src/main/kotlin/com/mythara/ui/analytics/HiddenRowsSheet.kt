@@ -3,6 +3,7 @@ package com.mythara.ui.analytics
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,6 +54,10 @@ fun HiddenRowsSheet(
     rows: List<ContactProfileRow>,
     onDismiss: () -> Unit,
     onRestore: (nameKey: String) -> Unit,
+    /** Long-press a hidden row to pin its classification — e.g.
+     *  "always classify <X> as organization". Optional so older
+     *  call sites still compile. */
+    onLongPressRow: (ContactProfileRow) -> Unit = {},
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Box(
@@ -101,7 +106,11 @@ fun HiddenRowsSheet(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         items(items = rows, key = { it.nameKey }) { row ->
-                            HiddenRowTile(row = row, onRestore = { onRestore(row.nameKey) })
+                            HiddenRowTile(
+                                row = row,
+                                onRestore = { onRestore(row.nameKey) },
+                                onLongPress = { onLongPressRow(row) },
+                            )
                         }
                     }
                 }
@@ -110,10 +119,12 @@ fun HiddenRowsSheet(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun HiddenRowTile(
     row: ContactProfileRow,
     onRestore: () -> Unit,
+    onLongPress: () -> Unit = {},
 ) {
     Row(
         modifier = Modifier
@@ -121,6 +132,10 @@ private fun HiddenRowTile(
             .clip(RoundedCornerShape(10.dp))
             .background(MytharaColors.Surface)
             .border(1.dp, MytharaColors.SurfaceHigh, RoundedCornerShape(10.dp))
+            .combinedClickable(
+                onClick = {},
+                onLongClick = onLongPress,
+            )
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

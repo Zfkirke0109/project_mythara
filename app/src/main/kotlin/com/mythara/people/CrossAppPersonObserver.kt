@@ -114,14 +114,21 @@ class CrossAppPersonObserver @Inject constructor(
         // (kind + confidence + reason) we persist on the row so
         // the People-screen filter, Insights node colour, and the
         // Hidden-Rows sub-screen all agree.
+        // Canonicalise BEFORE classifying so the classifier's
+        // user-override gate gets a chance to win. Without the
+        // nameKey, the override store can't be consulted and the
+        // user's "always classify <X> as organization" pin would
+        // be silently ignored every time a fresh notification from
+        // that sender arrives.
+        val nameKey = canonicalizeName(senderName)
+        if (nameKey.isBlank()) return
+
         val verdict = entityClassifier.classifyIncoming(
             senderName = senderName,
             packageName = r.packageName,
+            nameKey = nameKey,
         )
         val hideOnInsert = verdict.kind != ContactProfileRow.KIND_PERSON
-
-        val nameKey = canonicalizeName(senderName)
-        if (nameKey.isBlank()) return
 
         val now = System.currentTimeMillis()
         // Direct key match first; if that misses, scan the aliases

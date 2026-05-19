@@ -42,6 +42,12 @@ import javax.inject.Singleton
 @Singleton
 class EntityKindClassifier @Inject constructor(
     private val lifelineRepo: LifelineRepository,
+    /** User-pinned overrides — when set, the classifier returns the
+     *  user's choice with confidence 1.0 and skips every heuristic.
+     *  This is how "WhatsApp Business" notifications from your tailor
+     *  get classified as `organization` even though the heuristics
+     *  alone might think it's a person. */
+    private val overrideStore: ContactKindOverrideStore,
 ) {
 
     data class Verdict(
@@ -60,12 +66,25 @@ class EntityKindClassifier @Inject constructor(
     @Volatile private var placeCacheTs: Long = 0L
 
     /** Classify based on raw sender name + the package the
-     *  notification came from. Highest-signal path — uses both. */
+     *  notification came from. Highest-signal path — uses both.
+     *  When the caller knows the row's canonical `nameKey` it can
+     *  pass it so the user-override store gets a chance to win
+     *  before any heuristic runs. */
     suspend fun classifyIncoming(
         senderName: String,
         packageName: String,
         aliases: List<String> = emptyList(),
+        nameKey: String? = null,
     ): Verdict {
+        // User-pinned override beats every heuristic. Only consulted
+        // when the caller already knows the canonical nameKey for
+        // this sender (typically the CrossAppPersonObserver path,
+        // which canonicalises the name right before calling).
+        if (nameKey != null && nameKey.isNotBlank()) {
+            runCatching { overrideStore.get(nameKey) }.getOrNull()?.let { ov ->
+                return Verdict(ov.kind, 1.0f, "user-pinned override")
+            }
+        }
         // Known messenger app → trust the sender is a person unless
         // it trips one of the brand / promo filters below.
         val fromMessenger = packageName in MESSENGER_APP_PACKAGES
@@ -129,8 +148,17 @@ class EntityKindClassifier @Inject constructor(
 
     /** Classify a row that already exists (the cleanup runner path).
      *  Aggregates sourceApps + aliases to mimic the incoming-side
-     *  signals as best we can. */
+     *  signals as best we can.
+     *
+     *  USER OVERRIDE wins over every heuristic — if the user has
+     *  pinned this row to a kind via long-press in People, we return
+     *  that kind with confidence 1.0 and skip the cascade entirely. */
     suspend fun classifyExisting(row: ContactProfileRow): Verdict {
+        // Override gate first — if pinned, we're done.
+        runCatching { overrideStore.get(row.nameKey) }.getOrNull()?.let { ov ->
+            return Verdict(ov.kind, 1.0f, "user-pinned override")
+        }
+
         val aliases = runCatching { json.decodeFromString(stringList, row.aliasesJson) }
             .getOrDefault(emptyList())
         val sourceApps = runCatching { json.decodeFromString(stringList, row.sourceAppsJson) }
