@@ -152,26 +152,67 @@ class TermuxExecTool @Inject constructor(
             )
         }
 
-        val stdout = resultBundle.getString("stdout").orEmpty()
-        val stderr = resultBundle.getString("stderr").orEmpty()
-        val exitCode = resultBundle.getInt("exitCode", -1)
-        val errCode = resultBundle.getInt("errCode", 0)
-        val errmsg = resultBundle.getString("errmsg").orEmpty()
+        // Dump the full Bundle so we can see what Termux actually
+        // returned. Termux's key naming has changed across major
+        // versions, and the default values below are what bite us
+        // when a key isn't present — surfacing the keys themselves
+        // is the only reliable way to debug a misclassified result.
+        Log.d(TAG, "result bundle keys: ${resultBundle.keySet().joinToString()}")
+        resultBundle.keySet().forEach { k ->
+            val v = runCatching { resultBundle.get(k) }.getOrNull()
+            Log.d(TAG, "  $k = $v")
+        }
+
+        // Sometimes the result Bundle wraps everything in another
+        // Bundle keyed differently across Termux versions; check
+        // common nesting paths before falling back to top-level.
+        val effective = resultBundle.getBundle(EXTRA_RESULT_BUNDLE)
+            ?: resultBundle.getBundle("PLUGIN_RESULT_BUNDLE")
+            ?: resultBundle.getBundle("commandResultBundle")
+            ?: resultBundle
+
+        val stdout = effective.getString("stdout").orEmpty()
+        val stderr = effective.getString("stderr").orEmpty()
+        val exitCode = effective.getInt("exitCode", Int.MIN_VALUE)
+        // Termux uses "err" for the bridge-level error code, NOT
+        // "errCode" (a common assumption from reading the wiki out
+        // of context). Both names are tried for forward/backward
+        // compatibility with version drift.
+        val err = when {
+            effective.containsKey("err") -> effective.getInt("err", 0)
+            effective.containsKey("errCode") -> effective.getInt("errCode", 0)
+            else -> 0
+        }
+        val errmsg = effective.getString("errmsg")
+            ?: effective.getString("err_msg")
+            ?: ""
 
         val truncatedOut = if (stdout.length > MAX_OUT) stdout.take(MAX_OUT) + "\n…[truncated]" else stdout
         val truncatedErr = if (stderr.length > MAX_OUT) stderr.take(MAX_OUT) + "\n…[truncated]" else stderr
 
-        // Termux's "errCode != 0" means the bridge itself rejected the
-        // request (binary not found, bad workdir, RunCommandService
-        // refused, …). The exec didn't run. Surface this distinctly
-        // from a non-zero exit code so the agent can act on it.
-        return if (errCode != 0) {
-            ToolResult.ok(
-                """{"status":"bridge_error","errCode":$errCode,"errmsg":${jsonString(errmsg)},""" +
-                    """"hint":"check the command path + Termux setup"}""",
+        // Three distinct failure modes the agent + verify UI need to
+        // tell apart:
+        //
+        //   1. Bridge error: Termux rejected the request before it
+        //      ran the command (bad path, allow-external-apps not
+        //      set, …). `err` is non-zero and `errmsg` describes it.
+        //   2. Empty result: the result Bundle came back but has
+        //      neither stdout/stderr nor an exit code — Termux sent
+        //      us a hollow reply, which happens with old or stripped
+        //      builds. Surface this so we don't lie that "exitCode
+        //      was -1".
+        //   3. Success: stdout / stderr / exitCode are all present
+        //      and meaningful.
+        val emptyResult = exitCode == Int.MIN_VALUE && stdout.isEmpty() && stderr.isEmpty()
+        return when {
+            err != 0 -> ToolResult.ok(
+                """{"status":"bridge_error","err":$err,"errmsg":${jsonString(errmsg)},""" +
+                    """"hint":"Termux rejected the request — most common cause is allow-external-apps=true missing from ~/.termux/termux.properties"}""",
             )
-        } else {
-            ToolResult.ok(
+            emptyResult -> ToolResult.ok(
+                """{"status":"empty_result","hint":"Termux returned a result with no stdout, stderr, or exit code. Check that allow-external-apps=true is set in ~/.termux/termux.properties and that you ran termux-reload-settings.","errmsg":${jsonString(errmsg)}}""",
+            )
+            else -> ToolResult.ok(
                 """{"status":"ok","exitCode":$exitCode,"stdout":${jsonString(truncatedOut)},""" +
                     """"stderr":${jsonString(truncatedErr)}}""",
             )

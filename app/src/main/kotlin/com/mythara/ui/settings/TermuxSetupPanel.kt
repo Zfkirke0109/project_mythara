@@ -117,8 +117,12 @@ class TermuxSetupPanelViewModel @Inject constructor(
                     VerifyState.Failed("Termux not installed — install from F-Droid.")
                 out.contains("\"status\":\"play_store_variant\"") ->
                     VerifyState.Failed("Play Store Termux is incompatible — install the F-Droid build instead.")
-                out.contains("ERR_SERVICE_NOT_FOUND") || out.contains("\"errCode\":-1001") ->
+                out.contains("\"err\":-1001") || out.contains("\"err\":-1002") ->
                     VerifyState.Failed("RunCommandService not found — install the F-Droid Termux build (not the Play Store version).")
+                out.contains("\"status\":\"bridge_error\"") ->
+                    VerifyState.Failed("Termux rejected the request. Inside Termux run: printf 'allow-external-apps=true\\n' > ~/.termux/termux.properties && termux-reload-settings, then click verify again.")
+                out.contains("\"status\":\"empty_result\"") ->
+                    VerifyState.Failed("Termux returned an empty result — usually means allow-external-apps=true is missing from ~/.termux/termux.properties.")
                 out.contains("\"status\":\"timeout\"") ->
                     VerifyState.Failed("Timed out. Did you set allow-external-apps=true in ~/.termux/termux.properties?")
                 else -> VerifyState.Failed("Unexpected response: ${out.take(160)}")
