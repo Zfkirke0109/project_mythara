@@ -31,24 +31,25 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * `generate_image` — generate an image from a text prompt.
+ * `generate_image` — generate an image from a text prompt via Gemini.
  *
- * Routing (first available wins):
- *   1. **Gemini** (`gemini-2.5-flash-image-preview`, aka "Nano Banana")
- *      — preferred when the user has a Gemini API key configured.
- *      Returns image bytes inline in the response (base64), so there
- *      is NO second download step that could fail (the previous
- *      MiniMax path 'download_failed' on expired signed CDN URLs).
- *   2. **MiniMax `image_generation`** — fallback when no Gemini key.
- *      Returns a CDN URL we then GET in a second hop.
+ * Uses Gemini's native image generation (`gemini-2.5-flash-image`,
+ * formerly "Nano Banana") through the standard `:generateContent`
+ * endpoint with `responseModalities: ["IMAGE"]`. Image bytes come
+ * back inline (base64) in the response, so there's NO second
+ * download step.
  *
- * Either way, the resulting image is saved to
- * `filesDir/canvas/images/<uuid>.<ext>` and the absolute path
- * returned. The agent can then pass that path into
- * [RenderCanvasTool] (via an `<img src="file://…">`) to display it.
+ * MiniMax's image-gen path was previously a fallback but: (1) its
+ * tier-gated availability meant production failures with cryptic
+ * `download_failed` errors on expired signed CDN URLs, and (2) the
+ * user explicitly wants Gemini-only routing. Image generation
+ * therefore returns a structured error when no Gemini key is set
+ * instead of trying anything else.
  *
- * If neither key is configured the tool returns an actionable error
- * telling the user where to paste a key.
+ * Output: image saved to `filesDir/canvas/images/<uuid>.<ext>`
+ * (typically `.png`); absolute path returned in the tool result.
+ * The agent passes that path into [RenderCanvasTool] via an
+ * `<img src="file://…">` to display it.
  */
 @Singleton
 class GenerateImageTool @Inject constructor(
@@ -57,10 +58,9 @@ class GenerateImageTool @Inject constructor(
 ) : Tool {
     override val name = "generate_image"
     override val description =
-        "Generate an image from a text prompt. Routes to Gemini's image-gen model " +
-            "when a Gemini API key is configured (no second download — bytes inline), " +
-            "else MiniMax. Returns a local file path the canvas can display via " +
-            "`<img src=\"file://…\">`."
+        "Generate an image from a text prompt via Gemini ($GEMINI_IMAGE_MODEL). " +
+            "Returns a local file path the canvas can display via " +
+            "`<img src=\"file://…\">`. Requires a Gemini API key in Settings."
 
     override val parameters = buildJsonObject {
         put("type", "object")
@@ -75,7 +75,12 @@ class GenerateImageTool @Inject constructor(
             })
             put("aspect", buildJsonObject {
                 put("type", "string")
-                put("description", "Optional aspect: '1:1' (default), '16:9', '9:16', '4:3', '3:4'. MiniMax-only; Gemini ignores.")
+                put(
+                    "description",
+                    "Optional aspect hint folded into the prompt as text (Gemini doesn't take " +
+                        "a structured aspect parameter — phrasing is the lever). Values like " +
+                        "'square', 'landscape', 'portrait', '16:9', '9:16'.",
+                )
             })
         })
         put("required", JsonArray(listOf(JsonPrimitive("prompt"))))
@@ -91,40 +96,36 @@ class GenerateImageTool @Inject constructor(
         val rawPrompt = args["prompt"]?.jsonPrimitive?.contentOrNull()?.trim().orEmpty()
         if (rawPrompt.isBlank()) return ToolResult.fail("prompt must be non-empty")
         val style = args["style"]?.jsonPrimitive?.contentOrNull()?.trim().orEmpty()
-        val aspect = args["aspect"]?.jsonPrimitive?.contentOrNull()?.trim()?.ifBlank { null } ?: "1:1"
-        val prompt = if (style.isBlank()) rawPrompt else "$rawPrompt, $style"
+        val aspect = args["aspect"]?.jsonPrimitive?.contentOrNull()?.trim().orEmpty()
+        // Gemini doesn't take a structured aspect parameter — bake
+        // both style and aspect hints into the natural-language prompt.
+        val prompt = buildString {
+            append(rawPrompt)
+            if (style.isNotBlank()) append(", $style")
+            if (aspect.isNotBlank()) append(", $aspect")
+        }
 
         val geminiKey = settings.geminiKeyFlow().first().orEmpty()
-        val minimaxKey = settings.apiKeyFlow().first().orEmpty()
-
-        if (geminiKey.isBlank() && minimaxKey.isBlank()) {
+        if (geminiKey.isBlank()) {
             return ToolResult.fail(
-                "image_gen_no_key: open Settings → paste a Gemini API key (preferred) " +
-                    "or a MiniMax API key, then retry.",
+                "image_gen_no_key: image generation requires a Gemini API key. " +
+                    "Open Settings → paste your Gemini API key, then retry.",
             )
         }
 
         return withContext(Dispatchers.IO) {
-            // Try Gemini first when configured — inline bytes, no
-            // second hop that can fail with an expired signed URL.
-            if (geminiKey.isNotBlank()) {
-                val r = runCatching { generateViaGemini(prompt, geminiKey) }
-                    .getOrElse { e ->
-                        Log.w(TAG, "Gemini image-gen threw: ${e.message}")
-                        null
-                    }
-                if (r != null) return@withContext r
-                Log.i(TAG, "Gemini image-gen fell through; trying MiniMax")
-            }
-
-            if (minimaxKey.isNotBlank()) {
-                return@withContext runCatching { generateViaMiniMax(prompt, aspect, minimaxKey) }
-                    .getOrElse { ToolResult.fail("image_gen_error: ${it.message ?: it.javaClass.simpleName}") }
-            }
-
-            ToolResult.fail(
-                "image_gen_failed: Gemini path didn't return an image and no MiniMax key is set as fallback.",
-            )
+            runCatching { generateViaGemini(prompt, geminiKey) }
+                .getOrElse { e ->
+                    Log.w(TAG, "Gemini image-gen threw: ${e.message}", e)
+                    ToolResult.fail(
+                        "image_gen_error: ${e.message ?: e.javaClass.simpleName}. " +
+                            "Check your Gemini API key + quota.",
+                    )
+                }
+                ?: ToolResult.fail(
+                    "image_gen_failed: Gemini returned no image for the prompt. " +
+                        "Try rephrasing — Gemini's safety filters can reject otherwise-fine prompts.",
+                )
         }
     }
 
@@ -190,65 +191,7 @@ class GenerateImageTool @Inject constructor(
         null
     }.getOrNull()
 
-    // ─── MiniMax fallback path ───────────────────────────────────────
-    private fun generateViaMiniMax(prompt: String, aspect: String, apiKey: String): ToolResult {
-        val body = buildJsonObject {
-            put("model", "image-01")
-            put("prompt", prompt)
-            put("aspect_ratio", aspect)
-            put("response_format", "url")
-            put("n", 1)
-        }.toString().toRequestBody("application/json".toMediaTypeOrNull())
-
-        val req = Request.Builder()
-            .url("https://api.minimax.io/v1/image_generation")
-            .header("Authorization", "Bearer $apiKey")
-            .header("Content-Type", "application/json")
-            .post(body)
-            .build()
-
-        http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                return ToolResult.fail(
-                    "image_gen_failed: http ${resp.code} — your MiniMax tier may not include image generation.",
-                )
-            }
-            val text = resp.body?.string().orEmpty()
-            val urls = parseImageUrls(text)
-            if (urls.isEmpty()) return ToolResult.fail("image_gen_failed: no image url in response — ${text.take(200)}")
-            val firstUrl = urls.first()
-            val downloaded = downloadImage(firstUrl)
-                ?: return ToolResult.fail(
-                    "download_failed: $firstUrl — MiniMax returned a URL but the bytes weren't reachable. " +
-                        "Configure a Gemini API key (inline-bytes path, no second download) to avoid this.",
-                )
-            return ToolResult.ok(
-                """{"path":"${downloaded.absolutePath.escape()}","backend":"minimax","url":"$firstUrl","prompt":"${prompt.escape()}"}""",
-            )
-        }
-    }
-
-    /** Extract image URLs from the MiniMax response JSON.
-     *  Shape: `{"data":{"image_urls":["https://...", ...]}, ...}` */
-    private fun parseImageUrls(json: String): List<String> = runCatching {
-        val parsed = kotlinx.serialization.json.Json.parseToJsonElement(json).jsonObject
-        val data = parsed["data"]?.jsonObject ?: return@runCatching emptyList<String>()
-        val urls = data["image_urls"]?.jsonArray ?: return@runCatching emptyList<String>()
-        urls.mapNotNull { it.jsonPrimitive.contentOrNull() }
-    }.getOrElse { emptyList() }
-
-    private fun downloadImage(url: String): File? = runCatching {
-        val req = Request.Builder().url(url).get().build()
-        http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return@use null
-            val bytes = resp.body?.bytes() ?: return@use null
-            val ext = url.substringAfterLast('.', "png").take(4).lowercase()
-                .takeIf { it in setOf("png", "jpg", "jpeg", "webp") } ?: "png"
-            saveBytes(bytes, ext)
-        }
-    }.getOrNull()
-
-    /** Common write path for both backends. */
+    /** Write bytes to filesDir/canvas/images. */
     private fun saveBytes(bytes: ByteArray, ext: String): File {
         val dir = File(context.filesDir, "canvas/images").apply { mkdirs() }
         val file = File(dir, "${UUID.randomUUID()}.$ext")
@@ -268,9 +211,12 @@ class GenerateImageTool @Inject constructor(
 
     companion object {
         private const val TAG = "Mythara/ImageGen"
-        /** Gemini's image-generation model. "Nano Banana" — returns
-         *  PNG bytes inline in the `:generateContent` response under
-         *  the same Gemini API key used for vision captioning. */
-        private const val GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image-preview"
+        /** Gemini's native image-generation model. Formerly known as
+         *  "Nano Banana" while in preview as `gemini-2.5-flash-image
+         *  -preview`; now in production as `gemini-2.5-flash-image`.
+         *  Returns PNG bytes inline in the `:generateContent`
+         *  response under the same Gemini API key used for vision
+         *  captioning. No second download hop. */
+        const val GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
     }
 }
