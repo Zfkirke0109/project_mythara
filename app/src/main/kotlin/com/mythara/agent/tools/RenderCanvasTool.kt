@@ -230,20 +230,39 @@ class RenderCanvasTool @Inject constructor(
   <script src="preact-hooks.min.js"></script>
   <script src="htm.min.js"></script>
   <script>
-    // Expose a tiny no-build JSX shim. The agent imports
-    // { html, render, useState, useEffect } from window.mythara,
-    // builds components with the htm tagged template literal,
-    // and mounts into #root.
+    // Expose a tiny no-build JSX shim. Bindings are reachable
+    // TWO ways so whichever style the agent reaches for works:
+    //   1. window.mythara.{h, render, html, useState, ...}
+    //   2. top-level globals: h, render, html, useState, ...
+    // The second path matters because the natural code shape
+    // the LLM emits is `const { useState } = preact;` /
+    // `const h = html;` — direct globals — rather than
+    // destructuring from window.mythara. Field-tested: 1 prod
+    // failure on a mood-selector render that used top-level
+    // refs and crashed with "html is not defined".
+    const __mh = htm.bind(preact.h);
+    window.html = __mh;
+    window.h = preact.h;
+    window.render = preact.render;
+    window.Fragment = preact.Fragment;
+    window.useState = preactHooks.useState;
+    window.useEffect = preactHooks.useEffect;
+    window.useReducer = preactHooks.useReducer;
+    window.useRef = preactHooks.useRef;
+    window.useMemo = preactHooks.useMemo;
+    window.useCallback = preactHooks.useCallback;
     window.mythara = window.mythara || {};
     Object.assign(window.mythara, {
       h: preact.h,
       render: preact.render,
       Fragment: preact.Fragment,
-      html: htm.bind(preact.h),
+      html: __mh,
       useState: preactHooks.useState,
       useEffect: preactHooks.useEffect,
       useReducer: preactHooks.useReducer,
       useRef: preactHooks.useRef,
+      useMemo: preactHooks.useMemo,
+      useCallback: preactHooks.useCallback,
     });
   </script>
 """)
