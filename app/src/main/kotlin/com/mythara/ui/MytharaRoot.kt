@@ -427,14 +427,15 @@ fun MytharaRoot(
                                 }
                             }
                             composable(Routes.People) {
+                                // v7 P4 — contacts-style People: real
+                                // address book + favourites + frequency
+                                // + per-contact call / SMS / WA actions.
                                 com.mythara.ui.scaffold.MytharaScaffold(
-                                    title = "people",
+                                    title = "contacts",
                                     glyph = com.mythara.ui.theme.Glyph.DiamondFilled,
                                     onBack = { nav.popBackStack() },
                                 ) {
-                                    com.mythara.ui.analytics.PeopleScreen(
-                                        onBack = { nav.popBackStack() },
-                                    )
+                                    com.mythara.ui.people.ContactsScreen()
                                 }
                             }
                             composable(Routes.About) {
