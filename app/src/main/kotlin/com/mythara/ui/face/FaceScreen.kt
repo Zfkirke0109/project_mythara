@@ -214,6 +214,12 @@ fun FaceMesh(
     }
     val emotionDetector = remember { moodEntry.emotionDetector() }
     val historyStore = remember { moodEntry.moodHistoryStore() }
+    val livingShapeEngine = remember { moodEntry.livingShapeEngine() }
+    // Subscribe to the continuously-evolving living-shape state. The
+    // engine updates kind / rotation / glow / particle count any time
+    // a signal (mood, HR, voice tone, social temperature) changes, so
+    // FaceMesh just renders whatever the engine says is current.
+    val living by livingShapeEngine.state.collectAsState()
 
     // Stream pose updates into the EmotionDetector — fuses face smile +
     // HR delta + voice tone into a mood label and publishes via
@@ -280,64 +286,39 @@ fun FaceMesh(
         androidx.compose.runtime.mutableIntStateOf(shapeIndices.size)
     }
     LaunchedEffect(sessionId) {
+        // Hand the new-session roll to LivingShapeEngine — it owns the
+        // never-repeat guarantee, the particle count + rotation rate
+        // pick, the axis randomisation, and pushes the resulting state
+        // into its StateFlow so FaceMesh can render from `living`.
+        livingShapeEngine.startSession()
+        val s = livingShapeEngine.state.value
+        shapeKindLabel = s.kind
+        recentShapeKinds = (listOf(s.kind) + recentShapeKinds).take(4)
+        activeShapeCount = s.particleCount.coerceAtMost(shapeIndices.size)
+        // Re-sample shape coords for the freshly-picked kind.
         val rnd = Random(System.nanoTime() xor sessionId.toLong().shl(13))
-        // Read fresh recent history each session so a record we made
-        // last time influences this pick.
-        recentMoods = runCatching { historyStore.recentMoods() }.getOrDefault(emptyList())
-        // Current mood reading + intensity from EmotionDetector — may
-        // still be null on the very first frame, in which case the
-        // shape pick falls back to the uniform distribution.
-        val mood = com.mythara.branding.MoodSink.current()
-        val intensity = emotionDetector.reading.value?.intensity ?: 0.5f
-        val kind = com.mythara.face.ShapeMoodMapping.pickShape(
-            mood = mood,
-            recentHistory = recentMoods,
-            recentShapes = recentShapeKinds,
-            rnd = rnd,
-        )
-        shapeKindLabel = kind
-        // Slide the new pick onto the front of the avoid-list, keeping
-        // the most-recent two — long enough to GUARANTEE evolution,
-        // short enough to not box us into a corner with only 6 kinds.
-        recentShapeKinds = (listOf(kind) + recentShapeKinds).take(4)
-        // Dynamic particle count for THIS session.
-        val n = com.mythara.face.ShapeMoodMapping.particleCount(kind, mood, intensity)
-            .coerceAtMost(shapeIndices.size)
-        activeShapeCount = n
         ParticleShapes.sampleShape(
-            kind = kind,
-            n = n,
+            kind = s.kind,
+            n = activeShapeCount,
             radius = SHAPE_RADIUS,
             rnd = rnd,
             xs = shapeXs, ys = shapeYs, zs = shapeZs,
         )
-        ParticleShapes.randomUnitVector(rnd, rotationAxis)
-        sessionStartMs = System.currentTimeMillis()
+        // Mirror the engine's axis into our local FloatArray (the
+        // per-frame rotation reads from local for cheap indexing).
+        rotationAxis[0] = s.rotationAxis[0]
+        rotationAxis[1] = s.rotationAxis[1]
+        rotationAxis[2] = s.rotationAxis[2]
+        sessionStartMs = s.sessionStartMs
+        recentMoods = runCatching { historyStore.recentMoods() }.getOrDefault(emptyList())
     }
-    // When the face leaves, persist the session that just ended so
-    // the next pick can lean on this user's pattern over time.
+    // When the face leaves, ask the engine to wind the session down
+    // (drops energy parameters but KEEPS the shape kind + axis so the
+    // particles stay assembled at lower intensity), persist the
+    // session, and write a memory record to LearningVault.
     LaunchedEffect(pose.present) {
         if (!pose.present && sessionStartMs > 0L && sessionId > 0) {
-            val reading = emotionDetector.reading.value
-            val mood = reading?.mood ?: com.mythara.branding.MoodSink.current() ?: "calm"
-            val intensity = reading?.intensity ?: 0.5f
-            val durationMs = (System.currentTimeMillis() - sessionStartMs).coerceAtLeast(0L)
-            // Only record sessions where the user actually engaged
-            // for a beat (≥ 500 ms) — otherwise transient flicker
-            // events pollute the history.
-            if (durationMs >= 500L) {
-                runCatching {
-                    historyStore.record(
-                        com.mythara.face.MoodHistoryStore.MoodSession(
-                            tsMs = sessionStartMs,
-                            mood = mood,
-                            intensity = intensity,
-                            durationMs = durationMs,
-                            shapeKind = shapeKindLabel.name,
-                        ),
-                    )
-                }
-            }
+            livingShapeEngine.endSession()
             sessionStartMs = 0L
         }
     }
@@ -366,8 +347,13 @@ fun FaceMesh(
     // looking away feels responsive). Drives the `ease` field in
     // the Canvas below where every particle's final position is
     // sxN + (txN - sxN) * ease.
+    // Assembly NEVER drops to 0 anymore — when the face leaves, the
+    // shape PERSISTS (assembled, but at lower energy) rather than
+    // scattering apart. The user explicitly asked: "when face is not
+    // detected it must use the last evolved shape and keep that
+    // animation". So we oscillate between IDLE_ASSEMBLY and 1.0.
     val assembly by animateFloatAsState(
-        targetValue = if (pose.present) 1f else 0f,
+        targetValue = if (pose.present) 1f else IDLE_ASSEMBLY,
         animationSpec = if (pose.present) {
             tween(
                 durationMillis = 1800,
@@ -381,6 +367,32 @@ fun FaceMesh(
         },
         label = "assembly",
     )
+
+    // Transform-pulse: on every face-detect transition (sessionId
+    // bump), spike a value 0 → 1 → 0 over ~600 ms. The Canvas uses
+    // it to briefly boost rotation rate + glow + radius — the
+    // "lively transform animation" the user asked for so the shape
+    // visibly snaps to life when they look at the phone.
+    val transformPulse = androidx.compose.runtime.remember { Animatable(0f) }
+    LaunchedEffect(sessionId) {
+        if (sessionId > 0) {
+            transformPulse.snapTo(0f)
+            transformPulse.animateTo(
+                1f,
+                tween(
+                    durationMillis = 300,
+                    easing = androidx.compose.animation.core.FastOutSlowInEasing,
+                ),
+            )
+            transformPulse.animateTo(
+                0f,
+                tween(
+                    durationMillis = 600,
+                    easing = androidx.compose.animation.core.LinearOutSlowInEasing,
+                ),
+            )
+        }
+    }
 
     // Gather phase — drives a short "drift toward centre" pre-pass
     // before particles snap onto their final ring / sphere
@@ -440,16 +452,21 @@ fun FaceMesh(
         val w = size.width
         val h = size.height
         val ease = assembly.coerceIn(0f, 1f)
-        // Pre-compute the per-frame rotation factor for SHAPE
-        // particles. Cached outside the loop because every SHAPE
-        // particle uses the same (cosA, sinA) pair this frame.
-        // Rotation rate is mood-modulated: excited → faster spin,
-        // sad / calm → slower. Falls back to SHAPE_ROT_HZ when no
-        // mood reading exists yet.
-        val moodNow = emotionReading?.mood
-        val intensityNow = emotionReading?.intensity ?: 0.5f
-        val rotHz = com.mythara.face.ShapeMoodMapping.rotationRateHz(moodNow, intensityNow)
-        val glowMul = com.mythara.face.ShapeMoodMapping.glowMultiplier(moodNow, intensityNow)
+        // Read continuously-updated state from LivingShapeEngine —
+        // rotation rate + glow drift smoothly between mood transitions,
+        // social temperature tweaks the brightness, particle count is
+        // already baked into activeShapeCount above.
+        val rotHzBase = living.rotationRateHz
+        val glowMulBase = living.glowMultiplier
+        // Transform pulse — on session start (face just appeared),
+        // boost rotation 1.0 → 1.8 and glow 1.0 → 1.5 briefly so the
+        // shape visibly snaps awake. Decays back to base over ~600 ms.
+        val pulse = transformPulse.value
+        val rotHz = rotHzBase * (1f + 0.80f * pulse)
+        // Social temperature: warmer when the user has been
+        // interacting with people; tints glow upward a touch.
+        val socialGlow = 1f + 0.15f * (living.socialTemperature - 0.5f).coerceIn(-0.5f, 0.5f)
+        val glowMul = glowMulBase * (1f + 0.50f * pulse) * socialGlow
         val rotAng = timeSec * rotHz * 2f * PI.toFloat()
         val cosA = cos(rotAng)
         val sinA = sin(rotAng)
@@ -631,6 +648,15 @@ private const val SHAPE_GAZE_MULT = 0.085f
 private val SHAPE_PARTICLE_COUNT: Int
     get() = com.mythara.face.ShapeMoodMapping.MAX_PARTICLE_COUNT
 
+/** Assembly ease value the shape rests at when no face is detected.
+ *  The shape PERSISTS — coords stay around the rotated 3D positions
+ *  — but at a lower energy level so the user reads the difference
+ *  between "alive, looking at me" (assembly = 1.0) and "idle, holding
+ *  the last form" (assembly = 0.65). When the face returns, the
+ *  assembly tween smoothly drives 0.65 → 1.0 and the transformPulse
+ *  spikes briefly so the shape reads as snapping to life. */
+private const val IDLE_ASSEMBLY = 0.65f
+
 
 /** Mouth waveform y-offset (normalised height) at position [u] in
  *  [-1,1]. Always animated — even idle the ribbon undulates gently;
@@ -769,5 +795,6 @@ private fun buildParticles(): List<FParticle> {
 internal interface FaceMeshMoodEntryPoint {
     fun emotionDetector(): com.mythara.face.EmotionDetector
     fun moodHistoryStore(): com.mythara.face.MoodHistoryStore
+    fun livingShapeEngine(): com.mythara.face.LivingShapeEngine
 }
 

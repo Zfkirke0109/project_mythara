@@ -27,7 +27,7 @@ import kotlin.random.Random
  * [rodriguesRotateInPlace] for the axis-angle math that keeps the
  * assembled shape spinning around its session-randomised axis.
  */
-internal object ParticleShapes {
+object ParticleShapes {
 
     /** The shape catalogue. A random pick is minted at every
      *  face-detect session in [FaceMesh] so the user sees a different
@@ -262,7 +262,7 @@ internal object ParticleShapes {
  * 430 particles × 60 fps would create 25k garbage objects per second
  * otherwise.
  */
-internal fun rodriguesRotate(
+fun rodriguesRotate(
     px: Float, py: Float, pz: Float,
     kx: Float, ky: Float, kz: Float,
     c: Float, s: Float,
