@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.material3.MaterialTheme
@@ -80,16 +81,26 @@ fun HomeHubScreen(
             .fillMaxSize()
             .padding(horizontal = 14.dp)
             .padding(top = 8.dp),
+        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
     ) {
-        Spacer(Modifier.height(4.dp))
-        MytharaWordmark(fontSize = 32.sp)
+        Spacer(Modifier.height(8.dp))
+        // The brand rose — hero of the home hub. Breathes + rotates;
+        // tap = talk (Chat). Long-press / swipe / PTT still flow
+        // through the global amulet detector mounted in MytharaRoot.
+        com.mythara.ui.amulet.RoseAmulet(
+            modifier = Modifier.size(110.dp),
+            sizeDp = 110.dp,
+            onTap = onOpenChat,
+        )
+        Spacer(Modifier.height(6.dp))
+        MytharaWordmark(fontSize = 30.sp, shimmer = true)
         Spacer(Modifier.height(2.dp))
         Text(
             text = mood?.let { "feeling $it" } ?: "your field intelligence",
             color = MytharaColors.FgMute,
             style = MaterialTheme.typography.bodySmall,
         )
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(14.dp))
 
         LazyVerticalGrid(
             columns = GridCells.Adaptive(minSize = 158.dp),
