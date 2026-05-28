@@ -203,6 +203,46 @@ fun FaceMesh(
     modifier: Modifier = Modifier,
 ) {
     val particles = remember { buildParticles() }
+    // SHAPE particles' indices + a per-coordinate-axis backing store.
+    // The shape coords get re-rolled each new session below; keeping
+    // them as flat FloatArrays avoids per-frame allocations on the
+    // ~430-particle hot path.
+    val shapeIndices = remember(particles) {
+        particles.indices.filter { particles[it].role == PRole.SHAPE }.toIntArray()
+    }
+    val shapeXs = remember(shapeIndices.size) { FloatArray(shapeIndices.size) }
+    val shapeYs = remember(shapeIndices.size) { FloatArray(shapeIndices.size) }
+    val shapeZs = remember(shapeIndices.size) { FloatArray(shapeIndices.size) }
+    // Per-session shape kind + rotation axis. Re-rolled each time the
+    // face-detect transitions absent → present, so the user sees a
+    // different 3D shape spinning around a different axis every time
+    // they pick the phone up. Initial roll at composition time.
+    var sessionId by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableIntStateOf(0)
+    }
+    LaunchedEffect(pose.present) {
+        if (pose.present) sessionId++
+    }
+    var shapeKindLabel by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(ParticleShapes.Kind.Icosahedron)
+    }
+    val rotationAxis = remember { FloatArray(3) }
+    LaunchedEffect(sessionId) {
+        val rnd = Random(System.nanoTime() xor sessionId.toLong().shl(13))
+        val kinds = ParticleShapes.Kind.entries.toTypedArray()
+        val kind = kinds[rnd.nextInt(kinds.size)]
+        shapeKindLabel = kind
+        ParticleShapes.sampleShape(
+            kind = kind,
+            n = shapeIndices.size,
+            radius = SHAPE_RADIUS,
+            rnd = rnd,
+            xs = shapeXs, ys = shapeYs, zs = shapeZs,
+        )
+        ParticleShapes.randomUnitVector(rnd, rotationAxis)
+    }
+    // Scratch buffer the per-frame Rodrigues rotation writes into.
+    val rotScratch = remember { FloatArray(3) }
 
     // Continuous frame time (seconds) — drives drift + the soundwave.
     var timeSec by androidx.compose.runtime.remember {
@@ -300,6 +340,18 @@ fun FaceMesh(
         val w = size.width
         val h = size.height
         val ease = assembly.coerceIn(0f, 1f)
+        // Pre-compute the per-frame rotation factor for SHAPE
+        // particles. Cached outside the loop because every SHAPE
+        // particle uses the same (cosA, sinA) pair this frame.
+        val rotAng = timeSec * SHAPE_ROT_HZ * 2f * PI.toFloat()
+        val cosA = cos(rotAng)
+        val sinA = sin(rotAng)
+        val axKx = rotationAxis[0]
+        val axKy = rotationAxis[1]
+        val axKz = rotationAxis[2]
+        // Index into shapeXs/shapeYs/shapeZs — incremented per
+        // SHAPE particle seen during the iteration.
+        var shapeI = 0
         for (p in particles) {
             // Scatter position — slow Lissajous drift across the screen.
             val sxN = p.homeX + p.driftAmpX * sin(timeSec * p.driftFreqX + p.driftPhaseX)
@@ -313,63 +365,52 @@ fun FaceMesh(
             // the active skin's brand colour rather than a fixed one.
             var color = palette.Charple
             var coreA: Float
-            // For CIRCLE particles, alpha is further modulated by where
-            // they are in their fly-in cycle (fades in as they approach
-            // the ring); HALO ignores this.
+            // SHAPE particles fade in as they converge from scatter
+            // into the rotating shape; HALO ignores this.
             var cycleAlpha = 1f
             when (p.role) {
                 PRole.HALO -> {
                     color = palette.Charple
                     coreA = 0.30f * (1f - 0.4f * ease) * p.glow
                 }
-                PRole.SPHERE -> {
+                PRole.SHAPE -> {
                     val aspect = w / h
-                    // Rotate the sphere around its vertical axis so
-                    // it has visible volume even at rest.
-                    val ang = timeSec * SPHERE_ROT_HZ
-                    val cA = cos(ang); val sA = sin(ang)
-                    val rx = p.sxv * cA + p.szv * sA
-                    val rz = -p.sxv * sA + p.szv * cA
-                    val ry = p.syv
-                    // Pseudo-3D depth: front (rz>0) larger + brighter,
-                    // back (rz<0) smaller + dimmer.
-                    val depth01 = ((rz / SPHERE_RADIUS) + 1f) * 0.5f
-                    txN = CIRCLE_CX + rx + gazeX * SPHERE_GAZE_MULT
-                    tyN = CIRCLE_CY + ry * aspect + gazeY * SPHERE_GAZE_MULT * aspect
-                    color = palette.Charple
-                    // Sphere stays solid — alpha modulated only by
-                    // depth + glow, not by the speaking sunburst.
-                    coreA = (0.30f + 0.65f * depth01) * p.glow
-                }
-                PRole.CIRCLE -> {
-                    val aspect = w / h
-                    // Static position on the ring (slow global rotation).
-                    val idleAngle = p.targetAngle + timeSec * CIRCLE_IDLE_ROT
-                    val ringX = cos(idleAngle) * CIRCLE_RADIUS
-                    val ringY = sin(idleAngle) * CIRCLE_RADIUS * aspect
-                    // Sunburst cycle (speaking): cycle 0 = at ring,
-                    // cycle 1 = at outer reach + faded. Quadratic
-                    // easing makes particles linger near the ring then
-                    // accelerate outward (like sparks). Per-particle
-                    // phase staggers so emission is continuous.
-                    val cycle = (((timeSec * p.cycleSpeed) + p.cyclePhase) % 1f + 1f) % 1f
-                    val outProg = cycle * cycle
-                    val burstR = CIRCLE_RADIUS + outProg * SUNBURST_DIST
-                    val burstAngle = idleAngle +
-                        sin(cycle * PI.toFloat() * 2f + p.cyclePhase * 6.2832f) * SUNBURST_WOBBLE
-                    val burstX = cos(burstAngle) * burstR
-                    val burstY = sin(burstAngle) * burstR * aspect
-                    // Blend static ring with sunburst by flowAmount.
-                    val assembledDX = ringX + (burstX - ringX) * flowAmount
-                    val assembledDY = ringY + (burstY - ringY) * flowAmount
-                    txN = CIRCLE_CX + assembledDX
-                    tyN = CIRCLE_CY + assembledDY
+                    // Unified 3D shape: rotate the particle's shape-
+                    // space coordinate around the session-randomised
+                    // axis. Same axis + rotation for every particle so
+                    // the entire shape spins as one rigid body. The
+                    // shape itself was chosen at random for this
+                    // session — tetrahedron / cube / octahedron /
+                    // icosahedron / torus / trefoil knot — so the
+                    // user sees a different form each time they pick
+                    // up the phone to look at it.
+                    val baseX = shapeXs[shapeI]
+                    val baseY = shapeYs[shapeI]
+                    val baseZ = shapeZs[shapeI]
+                    rodriguesRotate(
+                        baseX, baseY, baseZ,
+                        axKx, axKy, axKz,
+                        cosA, sinA,
+                        rotScratch,
+                    )
+                    val rx = rotScratch[0]
+                    val ry = rotScratch[1]
+                    val rz = rotScratch[2]
+                    // Pseudo-3D depth: front (rz>0) brighter, back
+                    // (rz<0) dimmer. Same depth logic the old SPHERE
+                    // role used, applied uniformly to the whole shape.
+                    val depth01 = ((rz / SHAPE_RADIUS) + 1f) * 0.5f
+                    txN = CIRCLE_CX + rx + gazeX * SHAPE_GAZE_MULT
+                    tyN = CIRCLE_CY + ry * aspect + gazeY * SHAPE_GAZE_MULT * aspect
                     color = particleColor(ringStops, p.hueU, timeSec, speaking)
-                    coreA = 0.62f * p.glow
-                    // Alpha: 1 at the ring, fades to 0 as the spark
-                    // races outward (only while speaking).
-                    val burstAlpha = 1f - cycle
-                    cycleAlpha = 1f + (burstAlpha - 1f) * flowAmount
+                    coreA = (0.30f + 0.65f * depth01) * p.glow
+                    // While speaking, gently breathe the shape's
+                    // alpha so the user reads "active" without the
+                    // disruptive outward sunburst the old CIRCLE
+                    // role used.
+                    val breathe = 1f + 0.18f * sin(timeSec * 6.0f) * flowAmount
+                    cycleAlpha = breathe
+                    shapeI++
                 }
             }
 
@@ -408,10 +449,15 @@ fun FaceMesh(
 
 // --------------------------------------------------- particle model
 
-/** Role decides how a particle behaves. v7.4: ambient [HALO] drift +
- *  [CIRCLE] ring (sunburst while speaking) + [SPHERE] inner cluster
- *  that rotates and tracks the detected face. */
-private enum class PRole { HALO, CIRCLE, SPHERE }
+/** Role decides how a particle behaves. v7.4 → v7.5: simplified
+ *  to ambient [HALO] drift + a single unified [SHAPE] that all
+ *  foreground particles assemble into. The shape itself (cube /
+ *  torus / icosahedron / ...) is picked at random each face-detect
+ *  session — see ParticleShapes — and rotates around a random axis.
+ *  The previous ring + sphere split was a fixed two-form design; the
+ *  new design surprises the user with a different geometry each
+ *  time they pick up the phone. */
+private enum class PRole { HALO, SHAPE }
 
 private class FParticle(
     val homeX: Float, val homeY: Float,        // scatter anchor (0..1 screen)
@@ -433,38 +479,37 @@ private class FParticle(
     val sxv: Float = 0f, val syv: Float = 0f, val szv: Float = 0f,
 )
 
-// v7.4 — a LARGE particle CIRCLE in the centre that ONLY forms when
-// the front camera detects a face. Inside the ring sits a particle
-// SPHERE that rotates slowly and tracks the user's head (its centre
-// offsets by pose.yaw/pitch so it visibly moves with the face).
-// While Mythara is speaking, the ring becomes a SUNBURST: particles
-// continuously radiate outward in rays, then respawn at the ring.
+// v7.5 — unified SHAPE renderer. All foreground particles assemble
+// into ONE random 3D shape (cube / torus / icosahedron / ...) that
+// spins around a random axis. The shape is re-rolled on every face-
+// detect transition so the user sees a different geometry each time
+// they pick the phone up to look at it. HALO ambient drift stays
+// unchanged for the background atmospheric layer.
 private const val CIRCLE_CX = 0.50f
 private const val CIRCLE_CY = 0.42f
-/** Ring radius (normalised X — Y multiplied by w/h so the ring stays
- *  circular regardless of phone aspect). v7.4 bumped from 0.17 → 0.26
- *  so the circle is a substantial centrepiece, not a tight halo. */
-private const val CIRCLE_RADIUS = 0.26f
-/** Slow rotation of the static ring (rad/s) — calm idle drift. */
-private const val CIRCLE_IDLE_ROT = 0.07f
-/** How far past the ring a sunburst particle travels before
- *  respawning (normalised X units). Scaled with the bigger ring. */
-private const val SUNBURST_DIST = 0.42f
-/** Slight per-cycle angular wobble so rays aren't perfectly straight
- *  spokes — keeps the burst organic. */
-private const val SUNBURST_WOBBLE = 0.10f
 
-/** Inner particle sphere — sits inside the ring and tracks the
- *  detected face. Radius in normalised X (aspect-corrected at draw). */
-private const val SPHERE_RADIUS = 0.10f
-/** Sphere auto-rotation rate around the vertical axis (rad/s) — slow
- *  spin gives the cluster volume even when the face is still. */
-private const val SPHERE_ROT_HZ = 0.30f
-/** How strongly the sphere's centre offsets with head pose (gaze).
- *  Higher = more dramatic tracking. */
-private const val SPHERE_GAZE_MULT = 0.085f
+/** Bounding radius of the assembled shape in normalised X (the Y
+ *  coord is aspect-corrected at draw time so the shape stays visually
+ *  round regardless of phone aspect). Picked to match the old CIRCLE_
+ *  RADIUS footprint so the visual centre-of-mass on Home stays the
+ *  same after the redesign. */
+private const val SHAPE_RADIUS = 0.22f
 
-private val HALO_COLOR = Color(0xFF9B86FF)        // lavender ambient drift
+/** Shape rotation rate (Hz) — one full turn every ~3.3 s. Slower than
+ *  a hand fidget, faster than continental drift; gives the shape
+ *  obvious volume while still feeling calm. */
+private const val SHAPE_ROT_HZ = 0.30f
+
+/** How strongly the shape's centre offsets with head pose. The whole
+ *  assembled shape (not just an inner cluster anymore) tracks the
+ *  user's head — so the geometry visibly leans toward them as they
+ *  move. */
+private const val SHAPE_GAZE_MULT = 0.085f
+
+/** Foreground particle count. Used to be 110 (sphere) + 320 (circle)
+ *  = 430 — keep the same total so the shape reads with similar
+ *  visual density to the old ring + sphere. */
+private const val SHAPE_PARTICLE_COUNT = 430
 
 
 /** Mouth waveform y-offset (normalised height) at position [u] in
@@ -554,13 +599,6 @@ private fun buildParticles(): List<FParticle> {
         rnd.nextFloat() * 6.2832f,             // driftPhaseY
     )
 
-    /** Box–Muller standard-normal sample (mean 0, sigma 1). */
-    fun gauss(): Float {
-        val u1 = rnd.nextDouble().coerceAtLeast(1e-9).toFloat()
-        val u2 = rnd.nextFloat()
-        return sqrt(-2f * ln(u1)) * cos(2f * PI.toFloat() * u2)
-    }
-
     // ─── Ambient halo (drifts everywhere, never converges) ──────────
     repeat(140) {
         val d = drift()
@@ -575,61 +613,25 @@ private fun buildParticles(): List<FParticle> {
         )
     }
 
-    // ─── Inner SPHERE — rotating cluster that tracks the face ──────
-    // Surface points sampled by normalising a 3D Gaussian (Marsaglia
-    // method) → uniform points on a sphere. A few interior particles
-    // add density to the centre so the sphere reads as filled, not
-    // just a thin shell.
-    repeat(110) { idx ->
-        val gx = gauss()
-        val gy = gauss()
-        val gz = gauss()
-        val len = sqrt(gx * gx + gy * gy + gz * gz).coerceAtLeast(1e-6f)
-        // First 80 = surface; remaining 30 = inner cluster (random
-        // radial offset 0.2..1.0 of SPHERE_RADIUS).
-        val rNorm = if (idx < 80) 1f else (0.2f + rnd.nextFloat() * 0.6f)
-        val sx = gx / len * SPHERE_RADIUS * rNorm
-        val sy = gy / len * SPHERE_RADIUS * rNorm
-        val sz = gz / len * SPHERE_RADIUS * rNorm
+    // ─── SHAPE particles — assemble into a random 3D form ──────────
+    // The actual (sxv, syv, szv) coordinates are written into a
+    // backing FloatArray inside FaceMesh on every face-detect session
+    // (see ParticleShapes.sampleShape). Here we only allocate the
+    // particle envelopes — drift parameters for the scatter state,
+    // size + glow + a hue position for the chromatic sweep. hueU is
+    // distributed linearly across the foreground particles so the
+    // colour sweep walks the whole spectrum around the shape.
+    repeat(SHAPE_PARTICLE_COUNT) { k ->
         val d = drift()
+        val hue = (k.toFloat() / SHAPE_PARTICLE_COUNT + rnd.nextFloat() * 0.04f) % 1f
         out += FParticle(
             homeX = d[0], homeY = d[1],
             driftAmpX = d[2], driftAmpY = d[3],
             driftFreqX = d[4], driftFreqY = d[5],
             driftPhaseX = d[6], driftPhaseY = d[7],
-            role = PRole.SPHERE,
-            size = 0.0020f + rnd.nextFloat() * 0.0022f,
-            glow = 0.75f + rnd.nextFloat() * 0.40f,
-            sxv = sx, syv = sy, szv = sz,
-        )
-    }
-
-    // ─── Centre ring — CIRCLE particles + speaking fly-in cycle ─────
-    // Each particle has a fixed target angle on the ring (evenly
-    // distributed for clean coverage) and a RANDOM outer spawn angle
-    // (uncorrelated, so the streaming comes from every direction).
-    // Per-particle cyclePhase + cycleSpeed staggers the fly-ins so the
-    // stream is continuous, not pulsed.
-    val ringN = 320
-    repeat(ringN) { k ->
-        val tA = (k / ringN.toFloat()) * 6.2832f + rnd.nextFloat() * 0.05f
-        val oA = rnd.nextFloat() * 6.2832f                  // random outer direction
-        val phase = rnd.nextFloat()                         // staggered cycle start
-        val speed = 0.40f + rnd.nextFloat() * 0.95f         // cycles/sec
-        val hue = ((tA / 6.2832f) + rnd.nextFloat() * 0.04f) % 1f
-        val d = drift()
-        out += FParticle(
-            homeX = d[0], homeY = d[1],
-            driftAmpX = d[2], driftAmpY = d[3],
-            driftFreqX = d[4], driftFreqY = d[5],
-            driftPhaseX = d[6], driftPhaseY = d[7],
-            role = PRole.CIRCLE,
+            role = PRole.SHAPE,
             size = 0.0018f + rnd.nextFloat() * 0.0022f,
-            glow = 0.7f + rnd.nextFloat() * 0.5f,
-            targetAngle = tA,
-            outerAngle = oA,
-            cyclePhase = phase,
-            cycleSpeed = speed,
+            glow = 0.70f + rnd.nextFloat() * 0.50f,
             hueU = hue,
         )
     }
