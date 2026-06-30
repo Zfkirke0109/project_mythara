@@ -20,12 +20,14 @@ class MiniMaxClient(
     private val region: Region,
 ) {
     private val authInterceptor = Interceptor { chain ->
+        val trimmedKey = apiKey.trim()
+
         val req = chain.request().newBuilder()
-            // Requested Gemini REST key header.
-            // Do not hardcode the key here; keep using SettingsStore/DataStore.
-            .addHeader("Authorization", "Bearer $apiKey")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Accept", "application/json")
+            // Gemini OpenAI-compatible endpoints use OpenAI-style Bearer auth.
+            // Keep the key in SettingsStore/DataStore; do not hardcode it here.
+            .header("Authorization", "Bearer $trimmedKey")
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
             .build()
 
         chain.proceed(req)
@@ -43,7 +45,8 @@ class MiniMaxClient(
             .addInterceptor(authInterceptor)
             .addInterceptor(logging)
             .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS) // required for long SSE streams
+            // readTimeout(0) means "no read timeout" and is required for long SSE streams.
+            .readTimeout(0, TimeUnit.MILLISECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
             .build()
     }
@@ -57,6 +60,12 @@ class MiniMaxClient(
             .create(MiniMaxApi::class.java)
     }
 
+    /**
+     * Validates the configured Gemini API key by calling the OpenAI-compatible
+     * models endpoint:
+     *
+     *   GET https://generativelanguage.googleapis.com/v1beta/openai/models
+     */
     suspend fun validateKey(): Result<List<String>> = runCatching {
         val res = retrofit.listModels()
         if (res.isSuccessful) {
@@ -68,8 +77,11 @@ class MiniMaxClient(
     }
 
     companion object {
-        const val GEMINI_MODEL: String = "gemini-1.5-flash"
+        const val GEMINI_MODEL: String = "gemini-3.5-flash"
 
+        /**
+         * Shared JSON config for OpenAI-compatible Gemini request/response bodies.
+         */
         val json: Json = Json {
             ignoreUnknownKeys = true
             encodeDefaults = true
