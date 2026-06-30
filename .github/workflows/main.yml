@@ -19,6 +19,8 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build Debug APK
+        env:
+          GITHUB_TOKEN: ${{ secrets.META_PACKAGES_TOKEN }}
         run: ./gradlew assembleDebug
 
       - name: Upload APK
