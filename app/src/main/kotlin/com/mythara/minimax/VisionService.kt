@@ -2,11 +2,8 @@ package com.mythara.minimax
 
 import android.util.Base64
 import android.util.Log
+import com.mythara.ai.AiProviderInterface
 import com.mythara.data.SettingsStore
-import com.mythara.minimax.models.VisionChatRequest
-import com.mythara.minimax.models.VisionContentPart
-import com.mythara.minimax.models.VisionImageUrl
-import com.mythara.minimax.models.VisionMessage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -14,7 +11,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * One-shot vision queries to MiniMax-VL-01.
+ * One-shot vision queries through the configured LiteLLM proxy.
  *
  * Used by the `take_photo` agent tool: after CameraX saves the JPEG,
  * this service base64-encodes it inline and asks the VL model what's
@@ -35,13 +32,12 @@ import javax.inject.Singleton
  *
  * Privacy: the image bytes leave the device as inline base64 in the
  * request body. There's no Mythara backend; this goes straight to
- * MiniMax under the user's own API key. The saved JPEG file stays
- * in private filesDir/photos/ regardless.
+ * the configured LiteLLM proxy. The saved JPEG file stays in private
+ * filesDir/photos/ regardless.
  */
 @Singleton
 class VisionService @Inject constructor(
     private val settings: SettingsStore,
-    private val gemini: GeminiVisionService,
     private val gemmaVision: GemmaVisionService,
 ) {
     /**
@@ -53,7 +49,7 @@ class VisionService @Inject constructor(
         val ok: Boolean,
         val text: String,
         val code: String? = null,
-        /** "gemma-on-device" | "gemini" | "minimax-vl" | null on early failure */
+        /** "gemma-on-device" | "ai-proxy-vision" | null on early failure */
         val backend: String? = null,
     )
 
@@ -78,21 +74,17 @@ class VisionService @Inject constructor(
         val snap = settings.snapshot()
 
         // ── Routing ────────────────────────────────────────────────
-        // Default order — on-device Gemma 4 E2B → cloud Gemini →
-        // MiniMax-VL. When the user flips `preferCloudVision` in
-        // Settings, the first two swap (cloud Gemini → Gemma → MiniMax)
-        // — useful when the user has a Gemini key and wants the
+        // Default order — on-device Gemma 4 E2B → LiteLLM proxy.
+        // When the user flips `preferCloudVision` in
+        // Settings, the first two swap (proxy cloud → Gemma)
+        // — useful when the user has a proxy-backed vision model and wants the
         // higher-accuracy cloud caption per call.
-        //
-        // MiniMax stays last in both orders (it's the final
-        // fallback for when neither preferred path is available
-        // and the user has only a MiniMax key).
         val gemmaFn: suspend () -> Outcome? = { tryGemmaOnDevice(imageFile, prompt) }
-        val geminiFn: suspend () -> Outcome? = { tryGeminiCloud(snap.geminiKey, imageFile, prompt) }
+        val proxyFn: suspend () -> Outcome? = { tryLiteLlmVision(snap, imageFile, prompt) }
         val ordered: List<suspend () -> Outcome?> = if (snap.preferCloudVision) {
-            listOf(geminiFn, gemmaFn)
+            listOf(proxyFn, gemmaFn)
         } else {
-            listOf(gemmaFn, geminiFn)
+            listOf(gemmaFn, proxyFn)
         }
         for (fn in ordered) {
             val r = fn() ?: continue
@@ -108,19 +100,11 @@ class VisionService @Inject constructor(
             }
             Log.i(TAG, "vision backend ${r.backend ?: "?"} fell through (${r.code ?: "?"})")
         }
-        // MiniMax-VL is the final fallback regardless of routing
-        // preference. Returns null when the user has no MiniMax key
-        // configured; we surface a unified "no key" error in that
-        // case so the caller sees ONE actionable message rather
-        // than a string of fall-throughs.
-        val minimax = tryMiniMaxCloud(snap.apiKey, snap.region, imageFile, prompt)
-        if (minimax != null) return@withContext minimax
-
         Outcome(
             false,
             "No vision backend produced a result. " +
                 "Install the Gemma model (Settings → on-device model) " +
-                "or add a Gemini / MiniMax API key.",
+                "or configure the LiteLLM proxy endpoint.",
             code = "all_backends_failed",
         )
     }
@@ -142,93 +126,61 @@ class VisionService @Inject constructor(
         )
     }
 
-    /** Run the cloud Gemini path. Returns null when no Gemini key
-     *  is configured (caller cascades). */
-    private suspend fun tryGeminiCloud(geminiKey: String?, imageFile: File, prompt: String): Outcome? {
-        if (geminiKey.isNullOrBlank()) return null
-        val r = runCatching {
-            gemini.describeImage(imageFile = imageFile, prompt = prompt, apiKey = geminiKey)
-        }.getOrElse { e ->
-            GeminiVisionService.Outcome(false, e.message ?: e.javaClass.simpleName, "threw")
-        }
-        return Outcome(
-            ok = r.ok,
-            text = r.text,
-            code = r.code,
-            backend = "gemini",
-        )
-    }
-
-    /** Run the cloud MiniMax-VL path. Returns null when neither a
-     *  MiniMax API key nor an image-readable file is available. */
-    private suspend fun tryMiniMaxCloud(
-        apiKey: String?,
-        region: Region,
+    /** Run the cloud vision path through LiteLLM. */
+    private suspend fun tryLiteLlmVision(
+        snap: SettingsStore.Snapshot,
         imageFile: File,
         prompt: String,
     ): Outcome? {
-        if (apiKey.isNullOrBlank()) return null
         val bytes = runCatching { imageFile.readBytes() }.getOrElse {
-            return Outcome(false, "Couldn't read image bytes: ${it.message}", code = "read_failed", backend = "minimax-vl")
+            return Outcome(false, "Couldn't read image bytes: ${it.message}", code = "read_failed", backend = "ai-proxy-vision")
         }
         if (bytes.size > MAX_BYTES) {
             return Outcome(
                 false,
                 "Image is too large (${bytes.size} bytes) — vision is capped at $MAX_BYTES.",
                 code = "image_too_large",
-                backend = "minimax-vl",
+                backend = "ai-proxy-vision",
             )
         }
         val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-        val dataUri = "data:image/jpeg;base64,$b64"
-        val request = VisionChatRequest(
+        val request = AiProviderInterface.visionChatRequest(
+            prompt = prompt,
+            jpegBase64 = b64,
             model = VISION_MODEL,
-            stream = false,
-            messages = listOf(
-                VisionMessage(
-                    role = "user",
-                    content = listOf(
-                        VisionContentPart(type = "text", text = prompt),
-                        VisionContentPart(
-                            type = "image_url",
-                            imageUrl = VisionImageUrl(url = dataUri, detail = "auto"),
-                        ),
-                    ),
-                ),
-            ),
-            temperature = 0.4,
-            maxCompletionTokens = MAX_RESPONSE_TOKENS,
+            maxTokens = MAX_RESPONSE_TOKENS,
         )
-        val client = MiniMaxClient(apiKey = apiKey, region = region)
+        val client = MiniMaxClient(
+            apiKey = snap.apiKey,
+            region = snap.region,
+            proxyBaseUrl = snap.aiProxyUrl,
+        )
         val result = runCatching { client.retrofit.chatCompletionNonStreaming(request) }
         if (result.isFailure) {
             val e = result.exceptionOrNull()
             Log.w(TAG, "vision call threw", e)
-            return Outcome(false, e?.message ?: "network failure", code = "network", backend = "minimax-vl")
+            return Outcome(false, e?.message ?: "network failure", code = "network", backend = "ai-proxy-vision")
         }
         val res = result.getOrThrow()
         if (!res.isSuccessful) {
             val mapped = ErrorMapper.fromHttp(res.code(), res.errorBody()?.string())
             Log.w(TAG, "vision call ${res.code()}: ${mapped.message}")
-            return Outcome(false, mapped.message, code = mapped.code ?: "http_${res.code()}", backend = "minimax-vl")
+            return Outcome(false, mapped.message, code = mapped.code ?: "http_${res.code()}", backend = "ai-proxy-vision")
         }
         val text = res.body()?.choices?.firstOrNull()?.message?.content
         if (text.isNullOrBlank()) {
-            return Outcome(false, "Empty response from vision model.", code = "empty", backend = "minimax-vl")
+            return Outcome(false, "Empty response from vision model.", code = "empty", backend = "ai-proxy-vision")
         }
-        return Outcome(ok = true, text = text.trim(), backend = "minimax-vl")
+        return Outcome(ok = true, text = text.trim(), backend = "ai-proxy-vision")
     }
 
     companion object {
         private const val TAG = "Mythara/Vision"
 
         /**
-         * MiniMax's vision-capable model. Documented at
-         * platform.minimax.io/docs/guides/text-vl. The default text
-         * model selected in Settings (M2 / M2.5 / etc.) stays
-         * untouched — vision is its own routing.
+         * LiteLLM model string for a vision-capable provider target.
          */
-        const val VISION_MODEL = "MiniMax-VL-01"
+        val VISION_MODEL: String = AiProviderInterface.DEFAULT_VISION_MODEL
 
         const val DEFAULT_PROMPT =
             "Describe what's in this photo in 1-2 short, natural sentences. " +

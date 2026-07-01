@@ -1,5 +1,6 @@
 package com.mythara.minimax
 
+import com.mythara.ai.AiProviderInterface
 import kotlinx.serialization.json.Json
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -10,27 +11,27 @@ import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import java.util.concurrent.TimeUnit
 
 /**
- * Factory for Gemini OpenAI-compatible network clients.
+ * Factory for LiteLLM/OpenAI-compatible network clients.
  *
  * The class/package names stay MiniMaxClient/com.mythara.minimax so the rest of
  * the app does not need import rewrites. Only the endpoint/auth behavior changes.
  */
 class MiniMaxClient(
-    private val apiKey: String,
+    private val apiKey: String?,
     private val region: Region,
+    proxyBaseUrl: String = region.baseUrl,
 ) {
-    private val authInterceptor = Interceptor { chain ->
-        val trimmedKey = apiKey.trim()
+    val baseUrl: String = AiProviderInterface.normalizeProxyBaseUrl(proxyBaseUrl)
 
-        val req = chain.request().newBuilder()
-            // Gemini OpenAI-compatible endpoints use OpenAI-style Bearer auth.
-            // Keep the key in SettingsStore/DataStore; do not hardcode it here.
-            .header("Authorization", "Bearer $trimmedKey")
+    private val authInterceptor = Interceptor { chain ->
+        val reqBuilder = chain.request().newBuilder()
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .build()
+        AiProviderInterface.authorizationHeader(apiKey)?.let { auth ->
+            reqBuilder.header("Authorization", auth)
+        }
 
-        chain.proceed(req)
+        chain.proceed(reqBuilder.build())
     }
 
     private val logging = HttpLoggingInterceptor().apply {
@@ -45,15 +46,14 @@ class MiniMaxClient(
             .addInterceptor(authInterceptor)
             .addInterceptor(logging)
             .connectTimeout(20, TimeUnit.SECONDS)
-            // readTimeout(0) means "no read timeout" and is required for long SSE streams.
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
             .build()
     }
 
     val retrofit: MiniMaxApi by lazy {
         Retrofit.Builder()
-            .baseUrl(region.baseUrl)
+            .baseUrl(baseUrl)
             .client(okHttp)
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()
@@ -61,10 +61,8 @@ class MiniMaxClient(
     }
 
     /**
-     * Validates the configured Gemini API key by calling the OpenAI-compatible
-     * models endpoint:
-     *
-     *   GET https://generativelanguage.googleapis.com/v1beta/openai/models
+     * Validates the configured LiteLLM proxy by calling its OpenAI-compatible
+     * models endpoint.
      */
     suspend fun validateKey(): Result<List<String>> = runCatching {
         val res = retrofit.listModels()
@@ -77,10 +75,10 @@ class MiniMaxClient(
     }
 
     companion object {
-        const val GEMINI_MODEL: String = "gemini-3.5-flash"
+        val GEMINI_MODEL: String = AiProviderInterface.DEFAULT_CHAT_MODEL
 
         /**
-         * Shared JSON config for OpenAI-compatible Gemini request/response bodies.
+         * Shared JSON config for OpenAI-compatible request/response bodies.
          */
         val json: Json = Json {
             ignoreUnknownKeys = true
@@ -92,4 +90,4 @@ class MiniMaxClient(
 }
 
 class ApiException(val mapped: ErrorMapper.Mapped) :
-    RuntimeException("Gemini ${mapped.httpStatus} ${mapped.code ?: ""}: ${mapped.message}")
+    RuntimeException("AI proxy ${mapped.httpStatus} ${mapped.code ?: ""}: ${mapped.message}")

@@ -1,12 +1,15 @@
 package com.mythara.minimax
 
+import com.mythara.ai.AiProviderInterface
+
 /**
  * Kept as Region for compatibility with existing SettingsStore/UI code.
- * Both entries now point to Gemini's OpenAI-compatible endpoint.
+ * Endpoint selection now resolves through SettingsStore.aiProxyUrl; these
+ * values are only safe LiteLLM defaults for older call sites.
  */
 enum class Region(val label: String, val baseUrl: String) {
-    Global("Gemini API", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-    China("Gemini API", "https://generativelanguage.googleapis.com/v1beta/openai/");
+    Global("LiteLLM proxy", AiProviderInterface.DEFAULT_PROXY_BASE_URL),
+    China("LiteLLM proxy", AiProviderInterface.DEFAULT_PROXY_BASE_URL);
 
     companion object {
         val Default: Region = Global

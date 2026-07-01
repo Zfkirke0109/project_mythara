@@ -12,6 +12,7 @@ import com.google.crypto.tink.Aead
 import com.google.crypto.tink.KeyTemplates
 import com.google.crypto.tink.aead.AeadConfig
 import com.google.crypto.tink.integration.android.AndroidKeysetManager
+import com.mythara.ai.AiProviderInterface
 import com.mythara.minimax.Region
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
@@ -40,9 +41,11 @@ class SettingsStore @Inject constructor(
 
     private val keyRegion = stringPreferencesKey("region")
     private val keyModel = stringPreferencesKey("model")
+    private val keyAiProxyUrl = stringPreferencesKey("aiProxyUrl")
 
     /**
-     * Gemini Developer API key used by the optional take_photo vision route.
+     * Legacy direct Gemini key storage. Kept only so existing installs can
+     * decrypt/clear old values; active AI calls now use the LiteLLM proxy.
      */
     private val keyGeminiKeyEncrypted = stringPreferencesKey("geminiKey.encrypted")
 
@@ -86,8 +89,19 @@ class SettingsStore @Inject constructor(
         coerceModel(prefs[keyModel])
     }
 
+    fun aiProxyUrlFlow(): Flow<String> = ctx.dataStore.data.map { prefs ->
+        AiProviderInterface.normalizeProxyBaseUrl(prefs[keyAiProxyUrl])
+    }
+
     suspend fun setApiKey(plain: String) {
-        val ct = aead.encrypt(plain.trim().toByteArray(Charsets.UTF_8), null)
+        val trimmed = plain.trim()
+        if (trimmed.isBlank()) {
+            ctx.dataStore.edit {
+                it.remove(keyApiKeyEncrypted)
+            }
+            return
+        }
+        val ct = aead.encrypt(trimmed.toByteArray(Charsets.UTF_8), null)
         ctx.dataStore.edit {
             it[keyApiKeyEncrypted] = Base64.encodeToString(ct, Base64.NO_WRAP)
         }
@@ -237,6 +251,13 @@ class SettingsStore @Inject constructor(
         }
     }
 
+    suspend fun setAiProxyUrl(url: String) {
+        val normalized = AiProviderInterface.normalizeProxyBaseUrl(url)
+        ctx.dataStore.edit {
+            it[keyAiProxyUrl] = normalized
+        }
+    }
+
     /**
      * Convenience snapshot for the network layer.
      */
@@ -245,6 +266,7 @@ class SettingsStore @Inject constructor(
         return Snapshot(
             apiKey = prefs[keyApiKeyEncrypted]?.let { tryDecrypt(it) },
             region = Region.fromId(prefs[keyRegion]),
+            aiProxyUrl = AiProviderInterface.normalizeProxyBaseUrl(prefs[keyAiProxyUrl]),
             model = coerceModel(prefs[keyModel]),
             geminiKey = prefs[keyGeminiKeyEncrypted]?.let { tryDecrypt(it) },
             elevenLabsKey = prefs[keyElevenLabsKeyEncrypted]?.let { tryDecrypt(it) },
@@ -263,6 +285,7 @@ class SettingsStore @Inject constructor(
     data class Snapshot(
         val apiKey: String?,
         val region: Region,
+        val aiProxyUrl: String = DEFAULT_AI_PROXY_URL,
         val model: String,
         val geminiKey: String? = null,
         val elevenLabsKey: String? = null,
@@ -273,14 +296,13 @@ class SettingsStore @Inject constructor(
     )
 
     companion object {
-        const val DEFAULT_MODEL: String = "gemini-3.5-flash"
+        const val DEFAULT_AI_PROXY_URL: String = "http://127.0.0.1:4000/v1/"
+        const val DEFAULT_MODEL: String = AiProviderInterface.DEFAULT_CHAT_MODEL
 
-        val SUPPORTED_MODELS: List<String> = listOf(
-            "gemini-3.5-flash",
-        )
+        val SUPPORTED_MODELS: List<String> = AiProviderInterface.SUPPORTED_CHAT_MODELS
 
         fun coerceModel(model: String?): String =
-            model?.trim()?.takeIf { it in SUPPORTED_MODELS } ?: DEFAULT_MODEL
+            AiProviderInterface.coerceModel(model)
 
         const val DEFAULT_ELEVEN_LABS_VOICE_ID: String = "21m00Tcm4TlvDq8ikWAM"
 

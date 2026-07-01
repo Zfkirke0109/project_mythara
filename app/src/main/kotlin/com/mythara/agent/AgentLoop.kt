@@ -105,14 +105,13 @@ class AgentLoop @Inject constructor(
         /** Stream-level failure (HTTP / SSE / mapped MiniMax code). */
         data class Error(val message: String, val retryable: Boolean) : Turn
 
-        /** No API key configured yet — UI surfaces a "Settings" prompt. */
+        /** No AI proxy endpoint configured yet — UI surfaces a "Settings" prompt. */
         data object MissingApiKey : Turn
     }
 
     fun submit(userText: String, fromVoice: Boolean = false): Flow<Turn> = flow {
         val snap = settings.snapshot()
-        val apiKey = snap.apiKey
-        if (apiKey.isNullOrBlank()) {
+        if (snap.aiProxyUrl.isBlank()) {
             emit(Turn.MissingApiKey); return@flow
         }
 
@@ -401,7 +400,7 @@ class AgentLoop @Inject constructor(
                     "    `window.mythara.sendInput(jsonString)` is available in every template — call it from button onclicks / form submits / game moves to post structured input back to me.\n" +
                     "  • update_canvas(js): run a JS snippet against the currently-rendered Canvas for incremental changes (game-board updates, image swaps) without a full re-render.\n" +
                     "  • read_canvas_input(timeout_ms): suspend until the user posts input from the Canvas. Returns either {status:'input', json:'...'} or {status:'timeout'}. Use after rendering an interactive page.\n" +
-                    "  • generate_image(prompt, style?, aspect?): generate an image via Gemini (gemini-2.5-flash-image, formerly Nano Banana). Bytes come back inline — no second download to fail. Requires a Gemini API key in Settings. Returns a local file path you can wrap in `<img src=\"file://...\">` inside a render_canvas call.\n" +
+                    "  • generate_image(prompt, style?, aspect?): generate an image via the configured LiteLLM proxy. Bytes come back inline — no second download to fail. Returns a local file path you can wrap in `<img src=\"file://...\">` inside a render_canvas call.\n" +
                     "  • open_url(url, mode='inline'|'chrome'): inline = render in the Canvas WebView (JS bridge OFF for safety). chrome = hand off to the user's system Chrome (cookies, extensions, anti-bot all native). Use chrome for Google search results, Cloudflare-protected sites, or anything that bot-flagged you in a previous turn.\n" +
                     "Never spam the Canvas — only render when the visual genuinely adds. Default auto_navigate=true makes the UI pivot to Canvas automatically; pass false if the render is supplemental.\n\n" +
                     // ─── Shell ─ THE primary Linux execution path ───
@@ -654,7 +653,11 @@ class AgentLoop @Inject constructor(
             null
         }
 
-        val client = MiniMaxClient(apiKey = apiKey, region = snap.region)
+        val client = MiniMaxClient(
+            apiKey = snap.apiKey,
+            region = snap.region,
+            proxyBaseUrl = snap.aiProxyUrl,
+        )
         val streaming = StreamingChat(client)
 
         var iter = 0
@@ -744,7 +747,7 @@ class AgentLoop @Inject constructor(
             var finishReason: String? = null
             var failure: ErrorMapper.Mapped? = null
 
-            streaming.stream(snap.region, req).collect { ev ->
+            streaming.stream(req).collect { ev ->
                 when (ev) {
                     is StreamingChat.StreamEvent.Text -> {
                         streamedText.append(ev.delta)
@@ -1086,9 +1089,8 @@ class AgentLoop @Inject constructor(
         maxIterations: Int = SUBAGENT_MAX_ITERATIONS,
     ): SubagentResult {
         val snap = settings.snapshot()
-        val apiKey = snap.apiKey
-        if (apiKey.isNullOrBlank()) {
-            return SubagentResult(ok = false, text = "missing api key", iterations = 0)
+        if (snap.aiProxyUrl.isBlank()) {
+            return SubagentResult(ok = false, text = "missing AI proxy endpoint", iterations = 0)
         }
 
         // Build the subagent's conversation: a focused system prompt
@@ -1101,7 +1103,11 @@ class AgentLoop @Inject constructor(
             ChatMessage(role = "user", content = task),
         )
 
-        val client = MiniMaxClient(apiKey = apiKey, region = snap.region)
+        val client = MiniMaxClient(
+            apiKey = snap.apiKey,
+            region = snap.region,
+            proxyBaseUrl = snap.aiProxyUrl,
+        )
         val streaming = StreamingChat(client)
 
         var iter = 0
@@ -1127,7 +1133,7 @@ class AgentLoop @Inject constructor(
             var finishReason: String? = null
             var failure: ErrorMapper.Mapped? = null
 
-            streaming.stream(snap.region, req).collect { ev ->
+            streaming.stream(req).collect { ev ->
                 when (ev) {
                     is StreamingChat.StreamEvent.Text -> streamedText.append(ev.delta)
                     is StreamingChat.StreamEvent.ToolCallsReady -> toolCalls = ev.calls

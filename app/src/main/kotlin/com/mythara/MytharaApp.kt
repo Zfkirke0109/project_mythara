@@ -99,17 +99,15 @@ class MytharaApp : Application(), Configuration.Provider {
         com.mythara.glasses.GlassesDatFacade.initializeIfAvailable(this)
 
         // Seed the API status dots in MytharaStatusBar based on
-        // configured credentials so the user sees blue/yellow on
+        // configured proxy endpoint so the user sees blue/yellow on
         // first launch (instead of grey-until-first-call). Decay
         // logic in ApiStatusStore re-flips to red on a real
         // failure or grey on connectivity loss.
         kotlinx.coroutines.GlobalScope.launch {
             runCatching {
                 val snap = settingsStore.snapshot()
-                if (!snap.apiKey.isNullOrBlank()) {
+                if (snap.aiProxyUrl.isNotBlank()) {
                     com.mythara.ui.system.ApiStatusStore.markMinimaxOnline()
-                }
-                if (!snap.geminiKey.isNullOrBlank()) {
                     com.mythara.ui.system.ApiStatusStore.markImageOnline()
                 }
             }
@@ -169,8 +167,9 @@ class MytharaApp : Application(), Configuration.Provider {
         // next time we're charging on Wi-Fi.
         lifelineScheduler.start()
         mediaStoreObserver.start()
-        // 5-minute heartbeat — fires memory sync + cross-device task
-        // pickup on a coroutine timer. Self-gates when sync is off.
+        // Deferred heartbeat — WorkManager fires memory sync +
+        // cross-device task pickup at the platform 15-minute floor.
+        // Self-gates when sync is off and survives One UI process kills.
         heartbeatSyncer.start()
         // MCP registry — observes config DataStore + maintains a live
         // snapshot of every tool the configured MCP servers expose.

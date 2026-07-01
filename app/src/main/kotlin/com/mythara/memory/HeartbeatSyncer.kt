@@ -2,97 +2,116 @@ package com.mythara.memory
 
 import android.content.Context
 import android.util.Log
+import androidx.hilt.work.HiltWorker
+import androidx.work.Constraints
+import androidx.work.CoroutineWorker
+import androidx.work.Data
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkerParameters
 import com.mythara.tasks.TaskExecutor
+import dagger.assisted.Assisted
+import dagger.assisted.AssistedInject
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import java.time.Duration
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * In-process 5-minute auto-sync. Triggers [MemorySyncScheduler.fireNow]
- * on a loop AND runs the [TaskExecutor.tick] heartbeat so each device
- * picks up its share of the cross-device task queue.
+ * WorkManager-backed heartbeat. Triggers memory sync, cross-device task pickup,
+ * and presence refresh without keeping Mythara's process alive.
  *
- * Why a coroutine timer instead of WorkManager: Android's
- * PeriodicWorkRequest floors at 15 minutes — the user explicitly
- * asked for 5. When the process is alive (which is most of the
- * time thanks to AgentForegroundService + the AutoReply path), this
- * loop drives the cadence. When the process dies, the existing
- * MemorySyncScheduler 24h periodic + the new TaskHeartbeatWorker
- * (15-min WorkManager job, the cadence floor) are the safety nets.
- *
- * Self-gates on:
- *  - memory sync configured (PAT + repo set)
- *  - memory sync enabled (user toggle)
- *  Otherwise the loop sleeps without doing anything — no Wi-Fi /
- *  battery cost when the user hasn't turned the feature on.
+ * One UI aggressively reclaims idle processes, so the old in-process timer was
+ * fragile and expensive. WorkManager's 15-minute periodic floor is the platform
+ * contract for this deferred sync work; user-initiated actions still call
+ * [HeartbeatSyncer.fireNow] for an immediate one-shot.
  */
-@Singleton
-class HeartbeatSyncer @Inject constructor(
-    @ApplicationContext private val ctx: Context,
+@HiltWorker
+class HeartbeatWorker @AssistedInject constructor(
+    @Assisted ctx: Context,
+    @Assisted params: WorkerParameters,
     private val scheduler: MemorySyncScheduler,
     private val memorySettings: MemorySettings,
     private val taskExecutor: TaskExecutor,
     private val presenceCache: DevicePresenceCache,
-) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    @Volatile private var loop: Job? = null
-    @Volatile private var started = false
+) : CoroutineWorker(ctx, params) {
 
-    fun start() {
-        if (started) return
-        started = true
-        loop = scope.launch {
-            // First tick after a short delay so we don't spam on cold
-            // start while everything else is still warming up.
-            delay(INITIAL_DELAY_MS)
-            while (true) {
-                runCatching { tick() }.onFailure {
-                    Log.w(TAG, "heartbeat tick failed: ${it.message}")
-                }
-                delay(INTERVAL_MS)
-            }
+    override suspend fun doWork(): Result {
+        val reason = inputData.getString(KEY_REASON) ?: "periodic"
+        val snap = runCatching { memorySettings.snapshot() }.getOrElse {
+            Log.w(TAG, "heartbeat settings read failed: ${it.message}")
+            return Result.retry()
         }
-        Log.d(TAG, "HeartbeatSyncer started (interval ${INTERVAL_MS / 1000}s)")
-    }
-
-    private suspend fun tick() {
-        val snap = runCatching { memorySettings.snapshot() }.getOrNull() ?: return
         if (!snap.enabled || !snap.configured) {
-            Log.v(TAG, "heartbeat: sync disabled/unconfigured — skipping")
-            return
+            Log.v(TAG, "heartbeat($reason): sync disabled/unconfigured - skipping")
+            return Result.success()
         }
-        Log.d(TAG, "heartbeat: firing sync + task tick + presence refresh")
-        // 1) Sync: ships pending tasks + heartbeat presence, pulls
-        //    remote task state.
+
+        Log.d(TAG, "heartbeat($reason): enqueue sync + task tick + presence refresh")
         scheduler.fireNow(force = false)
-        // 2) Task pick + execute: serially claim + run anything that
-        //    targets THIS device or any device. Bounded run per tick
-        //    so a backlog of tasks can't wedge the heartbeat.
         runCatching { taskExecutor.tick(maxTasks = 3) }
             .onFailure { Log.w(TAG, "task tick failed: ${it.message}") }
-        // 3) Presence refresh: pull the canonical device_messages/devices
-        //    directory into the in-memory cache so EnvironmentContext can
-        //    emit `proximity:<device>` facets synchronously per utterance
-        //    without hitting GitHub each time.
         runCatching { presenceCache.refreshFromHeartbeats() }
             .onFailure { Log.v(TAG, "presence refresh failed: ${it.message}") }
-    }
-
-    /** Single-shot manual kick — used by the "sync now" button + the
-     *  Tasks screen's "check now" affordance. */
-    fun fireNow() {
-        scope.launch { runCatching { tick() } }
+        return Result.success()
     }
 
     companion object {
         private const val TAG = "Mythara/Heartbeat"
-        const val INTERVAL_MS = 5L * 60 * 1000  // 5 min
-        const val INITIAL_DELAY_MS = 30L * 1000   // 30 s after boot
+        const val UNIQUE_PERIODIC = "mythara_heartbeat_periodic"
+        const val UNIQUE_ONESHOT = "mythara_heartbeat_oneshot"
+        const val KEY_REASON = "reason"
+    }
+}
+
+@Singleton
+class HeartbeatSyncer @Inject constructor(
+    @ApplicationContext private val ctx: Context,
+) {
+    private val wm: WorkManager get() = WorkManager.getInstance(ctx)
+
+    fun start() {
+        val req = PeriodicWorkRequestBuilder<HeartbeatWorker>(PERIOD)
+            .setInputData(Data.Builder().putString(HeartbeatWorker.KEY_REASON, "periodic").build())
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .setRequiresBatteryNotLow(true)
+                    .build(),
+            )
+            .setInitialDelay(INITIAL_DELAY)
+            .build()
+        wm.enqueueUniquePeriodicWork(
+            HeartbeatWorker.UNIQUE_PERIODIC,
+            ExistingPeriodicWorkPolicy.UPDATE,
+            req,
+        )
+        Log.d(TAG, "HeartbeatSyncer scheduled via WorkManager (${PERIOD.toMinutes()} min)")
+    }
+
+    fun fireNow() {
+        val req = OneTimeWorkRequestBuilder<HeartbeatWorker>()
+            .setInputData(Data.Builder().putString(HeartbeatWorker.KEY_REASON, "manual").build())
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .build(),
+            )
+            .build()
+        wm.enqueueUniqueWork(
+            HeartbeatWorker.UNIQUE_ONESHOT,
+            ExistingWorkPolicy.REPLACE,
+            req,
+        )
+    }
+
+    companion object {
+        private const val TAG = "Mythara/Heartbeat"
+        val PERIOD: Duration = Duration.ofMinutes(15)
+        val INITIAL_DELAY: Duration = Duration.ofMinutes(5)
     }
 }

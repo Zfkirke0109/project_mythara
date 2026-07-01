@@ -5,7 +5,6 @@ import androidx.lifecycle.viewModelScope
 import com.mythara.data.SettingsStore
 import com.mythara.mic.ElevenLabsTtsService
 import com.mythara.minimax.ApiException
-import com.mythara.minimax.GeminiVisionService
 import com.mythara.minimax.MiniMaxClient
 import com.mythara.minimax.Region
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -19,7 +18,6 @@ import javax.inject.Inject
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val store: SettingsStore,
-    private val gemini: GeminiVisionService,
     private val elevenLabs: ElevenLabsTtsService,
     private val supertonicStore: com.mythara.mic.supertonic.SupertonicModelStore,
     private val tts: com.mythara.mic.Tts,
@@ -67,15 +65,12 @@ class SettingsViewModel @Inject constructor(
 
     data class State(
         val region: Region = Region.Default,
+        val aiProxyUrl: String = SettingsStore.DEFAULT_AI_PROXY_URL,
         val apiKey: String? = null,
         val model: String = SettingsStore.DEFAULT_MODEL,
         val validating: Boolean = false,
         val validation: ValidationResult? = null,
         val supportedModels: List<String> = SettingsStore.SUPPORTED_MODELS,
-        // Gemini vision key (optional, separate from MiniMax key).
-        val geminiKey: String? = null,
-        val geminiValidating: Boolean = false,
-        val geminiValidation: ValidationResult? = null,
         // ElevenLabs TTS key + toggle + voice id.
         val elevenLabsKey: String? = null,
         val elevenLabsVoiceId: String = SettingsStore.DEFAULT_ELEVEN_LABS_VOICE_ID,
@@ -86,8 +81,8 @@ class SettingsViewModel @Inject constructor(
         val elevenLabsVoices: List<com.mythara.mic.ElevenLabsTtsService.Voice> = emptyList(),
         val elevenLabsVoicesLoading: Boolean = false,
         /** Vision routing preference. false = Gemma on-device first
-         *  (default; privacy + zero-cost). true = cloud Gemini first
-         *  when the key is configured (higher accuracy per call). */
+         *  (default; privacy + zero-cost). true = proxy vision first
+         *  when the endpoint is reachable (higher accuracy per call). */
         val preferCloudVision: Boolean = false,
         /** Currently-selected Supertonic-2 voice (F1..F5, M1..M5). */
         val supertonicVoice: String = SettingsStore.DEFAULT_SUPERTONIC_VOICE,
@@ -104,9 +99,9 @@ class SettingsViewModel @Inject constructor(
             _state.update {
                 it.copy(
                     region = snap.region,
+                    aiProxyUrl = snap.aiProxyUrl,
                     apiKey = snap.apiKey,
                     model = snap.model,
-                    geminiKey = snap.geminiKey,
                     elevenLabsKey = snap.elevenLabsKey,
                     elevenLabsVoiceId = snap.elevenLabsVoiceId,
                     useElevenLabs = snap.useElevenLabs,
@@ -154,47 +149,38 @@ class SettingsViewModel @Inject constructor(
         _state.update { it.copy(model = m) }
     }
 
-    suspend fun saveAndValidate(plainKey: String) {
-        if (plainKey.isBlank()) return
+    suspend fun setAiProxyUrl(url: String) {
+        store.setAiProxyUrl(url)
+        _state.update { it.copy(aiProxyUrl = com.mythara.ai.AiProviderInterface.normalizeProxyBaseUrl(url)) }
+    }
+
+    suspend fun saveAndValidate(proxyUrl: String, plainKey: String) {
+        store.setAiProxyUrl(proxyUrl)
         store.setApiKey(plainKey)
-        _state.update { it.copy(apiKey = plainKey, validating = true, validation = null) }
+        val normalizedProxyUrl = com.mythara.ai.AiProviderInterface.normalizeProxyBaseUrl(proxyUrl)
+        _state.update {
+            it.copy(
+                aiProxyUrl = normalizedProxyUrl,
+                apiKey = plainKey.trim().ifBlank { null },
+                validating = true,
+                validation = null,
+            )
+        }
         val region = _state.value.region
-        val client = MiniMaxClient(apiKey = plainKey, region = region)
+        val client = MiniMaxClient(
+            apiKey = plainKey,
+            region = region,
+            proxyBaseUrl = normalizedProxyUrl,
+        )
         val res = runCatching { client.validateKey().getOrThrow() }
         val v = when {
-            res.isSuccess -> ValidationResult(ok = true, message = "key OK · ${res.getOrNull()?.size ?: 0} models visible")
+            res.isSuccess -> ValidationResult(ok = true, message = "proxy OK · ${res.getOrNull()?.size ?: 0} models visible")
             res.exceptionOrNull() is ApiException ->
                 ValidationResult(ok = false, message = (res.exceptionOrNull() as ApiException).mapped.message)
             else ->
                 ValidationResult(ok = false, message = res.exceptionOrNull()?.message ?: "validation failed")
         }
         _state.update { it.copy(validating = false, validation = v) }
-    }
-
-    /**
-     * Save the Gemini vision key and probe it with a tiny one-shot
-     * `:generateContent` call to confirm the key is valid AND the
-     * default vision model is reachable for this account.
-     */
-    suspend fun saveAndValidateGemini(plainKey: String) {
-        val trimmed = plainKey.trim()
-        if (trimmed.isBlank()) return
-        store.setGeminiKey(trimmed)
-        _state.update { it.copy(geminiKey = trimmed, geminiValidating = true, geminiValidation = null) }
-        val outcome = runCatching { gemini.validate(trimmed) }.getOrElse {
-            com.mythara.minimax.GeminiVisionService.Outcome(false, it.message ?: "validation failed", "threw")
-        }
-        _state.update {
-            it.copy(
-                geminiValidating = false,
-                geminiValidation = ValidationResult(ok = outcome.ok, message = outcome.text),
-            )
-        }
-    }
-
-    suspend fun clearGeminiKey() {
-        store.clearGeminiKey()
-        _state.update { it.copy(geminiKey = null, geminiValidation = null) }
     }
 
     // ---------- ElevenLabs ----------

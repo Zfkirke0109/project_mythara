@@ -43,7 +43,6 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.mythara.minimax.Region
 import com.mythara.ui.theme.Glyph
 import com.mythara.ui.theme.MytharaColors
 import kotlinx.coroutines.launch
@@ -119,30 +118,32 @@ fun SettingsScreen(
         AutoLockPanel()
 
         Spacer(Modifier.height(16.dp))
-        Panel("region") {
-            Region.entries.forEach { r ->
-                RadioRow(
-                    label = r.label,
-                    selected = state.region == r,
-                    onSelect = { scope.launch { vm.setRegion(r) } },
-                )
-            }
-            Text(
-                text = "${Glyph.AccentBar} keys from minimax.io and minimaxi.com are not interchangeable.",
-                style = MaterialTheme.typography.bodySmall.copy(color = MytharaColors.FgDim),
-                modifier = Modifier.padding(top = 4.dp),
-            )
-        }
-
-        Spacer(Modifier.height(16.dp))
-        Panel("api key") {
-            var input by remember { mutableStateOf(state.apiKey ?: "") }
-            LaunchedEffect(state.apiKey) { input = state.apiKey.orEmpty() }
+        Panel("ai proxy") {
+            var proxyInput by remember { mutableStateOf(state.aiProxyUrl) }
+            var keyInput by remember { mutableStateOf(state.apiKey ?: "") }
+            LaunchedEffect(state.aiProxyUrl) { proxyInput = state.aiProxyUrl }
+            LaunchedEffect(state.apiKey) { keyInput = state.apiKey.orEmpty() }
             OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
+                value = proxyInput,
+                onValueChange = { proxyInput = it },
                 singleLine = true,
-                placeholder = { Text("eyJ…", color = MytharaColors.FgDim) },
+                placeholder = { Text("http://127.0.0.1:4000", color = MytharaColors.FgDim) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = MytharaColors.Fg,
+                    unfocusedTextColor = MytharaColors.Fg,
+                    focusedBorderColor = MytharaColors.Charple,
+                    unfocusedBorderColor = MytharaColors.SurfaceHigh,
+                    cursorColor = MytharaColors.Charple,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = keyInput,
+                onValueChange = { keyInput = it },
+                singleLine = true,
+                placeholder = { Text("optional LiteLLM virtual key", color = MytharaColors.FgDim) },
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -160,14 +161,14 @@ fun SettingsScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Button(
-                    onClick = { scope.launch { vm.saveAndValidate(input) } },
-                    enabled = !state.validating && input.isNotBlank(),
+                    onClick = { scope.launch { vm.saveAndValidate(proxyInput, keyInput) } },
+                    enabled = !state.validating && proxyInput.isNotBlank(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MytharaColors.Charple,
                         contentColor = MytharaColors.Fg,
                     ),
                 ) {
-                    Text(if (state.validating) "${Glyph.Ellipsis} validating" else "${Glyph.Check} validate")
+                    Text(if (state.validating) "${Glyph.Ellipsis} validating" else "${Glyph.Check} save & validate")
                 }
                 state.validation?.let { v ->
                     val color = if (v.ok) MytharaColors.Julep else MytharaColors.Sriracha
@@ -178,70 +179,12 @@ fun SettingsScreen(
                     )
                 }
             }
-        }
-
-        Spacer(Modifier.height(16.dp))
-        Panel("gemini vision key (optional)") {
-            var geminiInput by remember { mutableStateOf(state.geminiKey ?: "") }
-            LaunchedEffect(state.geminiKey) { geminiInput = state.geminiKey.orEmpty() }
-            OutlinedTextField(
-                value = geminiInput,
-                onValueChange = { geminiInput = it },
-                singleLine = true,
-                placeholder = { Text("AIza…", color = MytharaColors.FgDim) },
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = MytharaColors.Fg,
-                    unfocusedTextColor = MytharaColors.Fg,
-                    focusedBorderColor = MytharaColors.Charple,
-                    unfocusedBorderColor = MytharaColors.SurfaceHigh,
-                    cursorColor = MytharaColors.Charple,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Button(
-                        onClick = { scope.launch { vm.saveAndValidateGemini(geminiInput) } },
-                        enabled = !state.geminiValidating && geminiInput.isNotBlank(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MytharaColors.Charple,
-                            contentColor = MytharaColors.Fg,
-                        ),
-                    ) {
-                        Text(if (state.geminiValidating) "${Glyph.Ellipsis} validating" else "${Glyph.Check} validate")
-                    }
-                    if (!state.geminiKey.isNullOrBlank()) {
-                        Spacer(Modifier.padding(start = 8.dp))
-                        TextButton(onClick = { scope.launch { vm.clearGeminiKey() } }) {
-                            Text("${Glyph.Cross} clear", color = MytharaColors.FgMute)
-                        }
-                    }
-                }
-                state.geminiValidation?.let { v ->
-                    val color = if (v.ok) MytharaColors.Julep else MytharaColors.Sriracha
-                    Text(
-                        text = "${if (v.ok) Glyph.Check else Glyph.Cross} ${v.message}",
-                        color = color,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
             Text(
-                text = "${Glyph.AccentBar} when set, take_photo sends captured images to gemini-2.5-flash (dedicated vision) instead of MiniMax-VL-01. Get a free-tier key at aistudio.google.com/app/apikey. Encrypted at rest with the same Keystore-backed AEAD as your MiniMax key.",
+                text = "${Glyph.AccentBar} Mythara sends OpenAI-compatible requests to this LiteLLM proxy. Use http://127.0.0.1:4000 for Termux on this phone, or paste a Vercel/hosted URL. Gemini/OpenAI provider keys stay on the proxy.",
                 style = MaterialTheme.typography.bodySmall.copy(color = MytharaColors.FgDim),
                 modifier = Modifier.padding(top = 6.dp),
             )
 
-            // Routing preference toggle — lets a user with a Gemini
-            // key flip the cascade so the cloud Gemini call runs
-            // FIRST and the on-device Gemma is the fallback. Default
-            // (off) prioritises on-device for privacy + zero cost.
             Spacer(Modifier.padding(top = 12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -256,13 +199,13 @@ fun SettingsScreen(
                 )
                 Spacer(Modifier.padding(end = 6.dp))
                 Text(
-                    text = "prefer cloud Gemini over on-device Gemma",
+                    text = "prefer proxy vision over on-device Gemma",
                     color = MytharaColors.Fg,
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
             Text(
-                text = "${Glyph.AccentBar} off (default) = on-device Gemma 4 E2B runs first; private + free, cloud only as fallback. on = cloud Gemini runs first when a key is configured; higher caption accuracy at the cost of an API call per photo. MiniMax-VL is the final fallback in both modes.",
+                text = "${Glyph.AccentBar} off (default) = on-device Gemma runs first; cloud only as fallback. on = the proxy vision model runs first for higher accuracy when the endpoint is reachable.",
                 style = MaterialTheme.typography.bodySmall.copy(color = MytharaColors.FgDim),
                 modifier = Modifier.padding(top = 4.dp),
             )
@@ -689,21 +632,3 @@ private fun Panel(title: String, body: @Composable () -> Unit) {
         body()
     }
 }
-
-@Composable
-private fun RadioRow(label: String, selected: Boolean, onSelect: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TextButton(onClick = onSelect) {
-            Text(
-                text = "${if (selected) Glyph.CircleFilled else Glyph.CircleOutline}  $label",
-                color = if (selected) MytharaColors.Charple else MytharaColors.Fg,
-            )
-        }
-    }
-}
-

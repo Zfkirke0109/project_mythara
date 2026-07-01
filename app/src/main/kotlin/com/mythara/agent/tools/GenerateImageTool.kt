@@ -5,18 +5,16 @@ import android.util.Base64
 import android.util.Log
 import com.mythara.agent.Tool
 import com.mythara.agent.ToolResult
+import com.mythara.ai.AiProviderInterface
 import com.mythara.data.SettingsStore
+import com.mythara.minimax.MiniMaxClient
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -31,20 +29,11 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * `generate_image` — generate an image from a text prompt via Gemini.
+ * `generate_image` — generate an image from a text prompt via LiteLLM.
  *
- * Uses Gemini's native image generation (`gemini-2.5-flash-image`,
- * formerly "Nano Banana") through the standard `:generateContent`
- * endpoint with `responseModalities: ["IMAGE"]`. Image bytes come
- * back inline (base64) in the response, so there's NO second
- * download step.
- *
- * MiniMax's image-gen path was previously a fallback but: (1) its
- * tier-gated availability meant production failures with cryptic
- * `download_failed` errors on expired signed CDN URLs, and (2) the
- * user explicitly wants Gemini-only routing. Image generation
- * therefore returns a structured error when no Gemini key is set
- * instead of trying anything else.
+ * Uses the configured LiteLLM proxy's OpenAI-compatible
+ * `/v1/images/generations` route. Provider API keys stay behind the
+ * proxy; the app stores only the endpoint and optional LiteLLM virtual key.
  *
  * Output: image saved to `filesDir/canvas/images/<uuid>.<ext>`
  * (typically `.png`); absolute path returned in the tool result.
@@ -58,9 +47,9 @@ class GenerateImageTool @Inject constructor(
 ) : Tool {
     override val name = "generate_image"
     override val description =
-        "Generate an image from a text prompt via Gemini ($GEMINI_IMAGE_MODEL). " +
+        "Generate an image from a text prompt via the configured LiteLLM proxy ($IMAGE_MODEL). " +
             "Returns a local file path the canvas can display via " +
-            "`<img src=\"file://…\">`. Requires a Gemini API key in Settings."
+            "`<img src=\"file://…\">`."
 
     override val parameters = buildJsonObject {
         put("type", "object")
@@ -105,91 +94,63 @@ class GenerateImageTool @Inject constructor(
             if (aspect.isNotBlank()) append(", $aspect")
         }
 
-        val geminiKey = settings.geminiKeyFlow().first().orEmpty()
-        if (geminiKey.isBlank()) {
-            return ToolResult.fail(
-                "image_gen_no_key: image generation requires a Gemini API key. " +
-                    "Open Settings → paste your Gemini API key, then retry.",
-            )
-        }
+        val snap = settings.snapshot()
 
         return withContext(Dispatchers.IO) {
-            runCatching { generateViaGemini(prompt, geminiKey) }
+            runCatching { generateViaProxy(prompt, snap) }
                 .getOrElse { e ->
-                    Log.w(TAG, "Gemini image-gen threw: ${e.message}", e)
+                    Log.w(TAG, "LiteLLM image-gen threw: ${e.message}", e)
                     ToolResult.fail(
                         "image_gen_error: ${e.message ?: e.javaClass.simpleName}. " +
-                            "Check your Gemini API key + quota.",
+                            "Check your LiteLLM proxy URL, virtual key, and provider quota.",
                     )
                 }
                 ?: ToolResult.fail(
-                    "image_gen_failed: Gemini returned no image for the prompt. " +
-                        "Try rephrasing — Gemini's safety filters can reject otherwise-fine prompts.",
+                    "image_gen_failed: the LiteLLM proxy returned no inline image for the prompt.",
                 )
         }
     }
 
-    // ─── Gemini path ─────────────────────────────────────────────────
-    // POST https://generativelanguage.googleapis.com/v1beta/models/
-    //   gemini-2.5-flash-image-preview:generateContent?key=<KEY>
-    // body: { contents:[{parts:[{text:"<prompt>"}]}],
-    //         generationConfig:{responseModalities:["IMAGE"]} }
-    // response contains parts with inlineData{mimeType,data:base64}.
-    private fun generateViaGemini(prompt: String, apiKey: String): ToolResult? {
-        val bodyJson = buildJsonObject {
-            put("contents", buildJsonArray {
-                add(buildJsonObject {
-                    put("parts", buildJsonArray {
-                        add(buildJsonObject { put("text", prompt) })
-                    })
-                })
-            })
-            put("generationConfig", buildJsonObject {
-                put("responseModalities", buildJsonArray {
-                    add(JsonPrimitive("IMAGE"))
-                })
-            })
-        }
-        val body = bodyJson.toString().toRequestBody("application/json".toMediaTypeOrNull())
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/" +
-            "$GEMINI_IMAGE_MODEL:generateContent?key=$apiKey"
-        val req = Request.Builder().url(url).post(body)
+    private fun generateViaProxy(
+        prompt: String,
+        snap: SettingsStore.Snapshot,
+    ): ToolResult? {
+        val bodyJson = MiniMaxClient.json.encodeToString(
+            AiProviderInterface.ImageGenerationRequest.serializer(),
+            AiProviderInterface.imageGenerationRequest(prompt = prompt, model = IMAGE_MODEL),
+        )
+        val body = bodyJson.toRequestBody("application/json".toMediaTypeOrNull())
+        val builder = Request.Builder()
+            .url(AiProviderInterface.imageGenerationsUrl(snap.aiProxyUrl))
+            .post(body)
             .header("Content-Type", "application/json")
-            .build()
+        AiProviderInterface.authorizationHeader(snap.apiKey)?.let { builder.header("Authorization", it) }
+        val req = builder.build()
 
         http.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) {
-                Log.w(TAG, "Gemini image-gen http ${resp.code}: ${resp.body?.string()?.take(300)}")
+                Log.w(TAG, "LiteLLM image-gen http ${resp.code}: ${resp.body?.string()?.take(300)}")
                 return null
             }
             val text = resp.body?.string().orEmpty()
-            val (bytes, mime) = parseGeminiInlineImage(text) ?: run {
-                Log.w(TAG, "Gemini image-gen: no inlineData in response (${text.take(200)})")
+            val image = runCatching {
+                MiniMaxClient.json.decodeFromString(
+                    AiProviderInterface.ImageGenerationResponse.serializer(),
+                    text,
+                )
+            }.getOrNull()?.data?.firstOrNull()
+            val b64 = image?.b64Json
+            if (b64.isNullOrBlank()) {
+                Log.w(TAG, "LiteLLM image-gen: no b64_json in response (${text.take(200)})")
                 return null
             }
-            val file = saveBytes(bytes, mimeToExt(mime))
+            val bytes = Base64.decode(b64, Base64.DEFAULT)
+            val file = saveBytes(bytes, "png")
             return ToolResult.ok(
-                """{"path":"${file.absolutePath.escape()}","backend":"gemini","model":"$GEMINI_IMAGE_MODEL","prompt":"${prompt.escape()}"}""",
+                """{"path":"${file.absolutePath.escape()}","backend":"litellm-proxy","model":"$IMAGE_MODEL","prompt":"${prompt.escape()}"}""",
             )
         }
     }
-
-    private fun parseGeminiInlineImage(json: String): Pair<ByteArray, String>? = runCatching {
-        val root = kotlinx.serialization.json.Json.parseToJsonElement(json).jsonObject
-        val candidates = root["candidates"]?.jsonArray ?: return@runCatching null
-        for (cand in candidates) {
-            val parts = cand.jsonObject["content"]?.jsonObject?.get("parts")?.jsonArray
-                ?: continue
-            for (part in parts) {
-                val inline = part.jsonObject["inlineData"]?.jsonObject ?: continue
-                val mime = inline["mimeType"]?.jsonPrimitive?.contentOrNull() ?: continue
-                val b64 = inline["data"]?.jsonPrimitive?.contentOrNull() ?: continue
-                val bytes = Base64.decode(b64, Base64.DEFAULT)
-                if (bytes.isNotEmpty()) return@runCatching bytes to mime
-            }
-        }
-        null
-    }.getOrNull()
 
     /** Write bytes to filesDir/canvas/images. */
     private fun saveBytes(bytes: ByteArray, ext: String): File {
@@ -199,24 +160,11 @@ class GenerateImageTool @Inject constructor(
         return file
     }
 
-    private fun mimeToExt(mime: String): String = when (mime.lowercase()) {
-        "image/png" -> "png"
-        "image/jpeg", "image/jpg" -> "jpg"
-        "image/webp" -> "webp"
-        else -> "png"
-    }
-
     private fun JsonPrimitive.contentOrNull(): String? = runCatching { content }.getOrNull()
     private fun String.escape() = JSONObject.quote(this).removeSurrounding("\"")
 
     companion object {
         private const val TAG = "Mythara/ImageGen"
-        /** Gemini's native image-generation model. Formerly known as
-         *  "Nano Banana" while in preview as `gemini-2.5-flash-image
-         *  -preview`; now in production as `gemini-2.5-flash-image`.
-         *  Returns PNG bytes inline in the `:generateContent`
-         *  response under the same Gemini API key used for vision
-         *  captioning. No second download hop. */
-        const val GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
+        val IMAGE_MODEL: String = AiProviderInterface.DEFAULT_IMAGE_MODEL
     }
 }

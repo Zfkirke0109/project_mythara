@@ -18,12 +18,12 @@ import javax.inject.Singleton
 
 /**
  * Routes on-device insight generation between the **local Gemma** model
- * and the **MiniMax** cloud model, with a task-based policy:
+ * and the **LiteLLM proxy** cloud model, with a task-based policy:
  *
  *  - **Light** work (short summaries, day digests) → always local Gemma.
  *    Cheap, fast, fully offline; cloud quality wouldn't move the needle.
  *  - **Heavy** synthesis (Big Five, persona, the relationship graph,
- *    key-points) → MiniMax when the user has configured an API key AND
+ *    key-points) → LiteLLM proxy when the user has configured an endpoint AND
  *    the network is up — that's the better model for nuanced reads.
  *    Falls back to local Gemma when offline, unconfigured, or on any
  *    cloud error, so insights still generate either way.
@@ -75,15 +75,15 @@ class ModelRouter @Inject constructor(
 
     /**
      * True when *some* model can run an inference right now — either the
-     * local Gemma engine is loaded, or a MiniMax key is configured with
+     * local Gemma engine is loaded, or the LiteLLM proxy is configured with
      * a live network. Insight builders gate their Gemma pass on this.
      */
     suspend fun canInfer(): Boolean = gemma.isReady() || cloudConfigured()
 
-    /** True when a MiniMax key is set and the device has a live network. */
+    /** True when a proxy endpoint is configured and the device has a live network. */
     suspend fun cloudConfigured(): Boolean {
         val snap = runCatching { settings.snapshot() }.getOrNull() ?: return false
-        return !snap.apiKey.isNullOrBlank() && hasNetwork()
+        return snap.aiProxyUrl.isNotBlank() && hasNetwork()
     }
 
     // ----------------------------------------------------------- cloud
@@ -91,10 +91,13 @@ class ModelRouter @Inject constructor(
     private suspend fun cloudComplete(prompt: String, maxLen: Int): String? =
         withContext(Dispatchers.IO) {
             val snap = runCatching { settings.snapshot() }.getOrNull() ?: return@withContext null
-            val apiKey = snap.apiKey?.takeIf { it.isNotBlank() } ?: return@withContext null
             if (!hasNetwork()) return@withContext null
 
-            val client = MiniMaxClient(apiKey = apiKey, region = snap.region)
+            val client = MiniMaxClient(
+                apiKey = snap.apiKey,
+                region = snap.region,
+                proxyBaseUrl = snap.aiProxyUrl,
+            )
             val req = ChatRequest(
                 model = snap.model,
                 messages = listOf(ChatMessage(role = "user", content = prompt)),

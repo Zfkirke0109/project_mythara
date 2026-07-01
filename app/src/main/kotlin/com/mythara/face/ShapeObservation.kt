@@ -18,14 +18,14 @@ import kotlin.math.abs
  *
  * Two paths:
  *
- *   1. **Agent path (preferred)** — call MiniMax with a focused system
+ *   1. **Agent path (preferred)** — call the LiteLLM proxy with a focused system
  *      prompt that frames the agent as a quiet evolution-companion.
  *      The model decides what it wants to say to the user given the
  *      current shape, mood, intensity, social temperature, and recent
  *      mood trajectory. Goal of the line: nudge growth, surface a
  *      noticing, point at evolution. Never preachy.
  *
- *   2. **Canned fallback** — when no API key is configured, or the
+ *   2. **Canned fallback** — when no proxy is configured, or the
  *      network call fails / times out, fall back to the original
  *      template-driven generator so the user still sees *something*
  *      gentle. The canned voice and the agent voice share the same
@@ -59,8 +59,7 @@ class ShapeObservation @Inject constructor(
         recent: List<MoodHistoryStore.MoodSession>,
     ): String? {
         val snap = runCatching { settings.snapshot() }.getOrNull() ?: return null
-        val apiKey = snap.apiKey
-        if (apiKey.isNullOrBlank()) return null
+        if (snap.aiProxyUrl.isBlank()) return null
 
         val recentMoodTrace = recent.takeLast(5)
             .joinToString(" → ") { it.mood + "(${(it.intensity * 100).toInt()})" }
@@ -110,7 +109,11 @@ class ShapeObservation @Inject constructor(
         """.trimIndent()
 
         return runCatching {
-            val client = MiniMaxClient(apiKey = apiKey, region = snap.region)
+            val client = MiniMaxClient(
+                apiKey = snap.apiKey,
+                region = snap.region,
+                proxyBaseUrl = snap.aiProxyUrl,
+            )
             val streaming = StreamingChat(client)
             val req = ChatRequest(
                 model = snap.model,
@@ -125,7 +128,7 @@ class ShapeObservation @Inject constructor(
             )
             val out = StringBuilder()
             var failure: ErrorMapper.Mapped? = null
-            streaming.stream(snap.region, req).collect { ev ->
+            streaming.stream(req).collect { ev ->
                 when (ev) {
                     is StreamingChat.StreamEvent.Text -> out.append(ev.delta)
                     is StreamingChat.StreamEvent.Failure -> failure = ev.mapped

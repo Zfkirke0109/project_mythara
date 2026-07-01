@@ -51,14 +51,14 @@ class StreamingChat(private val client: MiniMaxClient) {
      * The Flow is cold — collecting it opens the connection; cancelling
      * the collector closes the SSE source.
      */
-    fun stream(region: Region, request: ChatRequest): Flow<StreamEvent> = callbackFlow {
+    fun stream(request: ChatRequest): Flow<StreamEvent> = callbackFlow {
         val bodyJson = MiniMaxClient.json.encodeToString(ChatRequest.serializer(), request)
         // Redacted log: surface the model + tool count + message count so we can
         // verify the wire payload without printing the user's keys or content.
         Log.d(TAG, "POST chat/completions model=${request.model} tools=${request.tools?.size ?: 0} msgs=${request.messages.size} stream=${request.stream}")
         val body = bodyJson.toRequestBody("application/json".toMediaType())
         val httpReq = Request.Builder()
-            .url(region.baseUrl + "chat/completions")
+            .url(client.baseUrl + "chat/completions")
             .post(body)
             .header("Accept", "text/event-stream")
             .build()
