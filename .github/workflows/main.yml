@@ -15,6 +15,12 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Set up Android signing tools
+        uses: android-actions/setup-android@v3
+
+      - name: Install APK signing tools
+        run: sdkmanager "build-tools;35.0.0"
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
@@ -22,6 +28,47 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.META_PACKAGES_TOKEN }}
         run: ./gradlew assembleDebug
+
+      - name: Sign and verify APKs with shared keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          EXPECTED_SIGNER_SHA256: ${{ secrets.EXPECTED_SIGNER_SHA256 }}
+        run: |
+          set -euo pipefail
+          for secret in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD EXPECTED_SIGNER_SHA256; do
+            test -n "${!secret}" || { echo "::error::Required signing secret $secret is not configured."; exit 1; }
+          done
+          keystore="$RUNNER_TEMP/rootlesszachdsp.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
+          expected="$(printf '%s' "$EXPECTED_SIGNER_SHA256" | tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]')"
+          cert="$(keytool -exportcert -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" | sha256sum | awk '{print toupper($1)}')"
+          test "$cert" = "$expected" || { echo "::error::Signing certificate fingerprint mismatch."; exit 1; }
+
+          mapfile -t apks < <(find . -path '*/build/outputs/apk/*' -type f -name '*.apk' -print | sort)
+          test "${#apks[@]}" -gt 0 || { echo "::error::No APKs were produced."; exit 1; }
+          for apk in "${apks[@]}"; do
+            aligned="$RUNNER_TEMP/$(basename "$apk").aligned.apk"
+            signed="$RUNNER_TEMP/$(basename "$apk").signed.apk"
+            "$ANDROID_HOME/build-tools/35.0.0/zipalign" -f -P 16 4 "$apk" "$aligned"
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign --ks "$keystore" --ks-key-alias "$KEY_ALIAS" --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --out "$signed" "$aligned"
+            report="$RUNNER_TEMP/$(basename "$apk").apksigner.txt"
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$signed" | tee "$report"
+            actual="$(awk -F': ' '/Signer #[0-9]+ certificate SHA-256 digest:/ {print toupper($2); exit}' "$report" | tr -d '[:space:]:' )"
+            test "$actual" = "$expected" || { echo "::error::Signed APK certificate mismatch."; exit 1; }
+            mv "$signed" "$apk"
+            rm -f "$aligned"
+          done
+          rm -f "$keystore"
+
+      - name: Remove signing material from runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/rootlesszachdsp.jks"
 
       - name: Upload APK
         uses: actions/upload-artifact@v5
